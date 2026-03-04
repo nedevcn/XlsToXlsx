@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 
 namespace Nedev.XlsToXlsx.Formats.Xls
@@ -7,6 +8,38 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         public ushort Id { get; set; }
         public ushort Length { get; set; }
         public byte[]? Data { get; set; }
+        
+        /// <summary>
+        /// 存储后续所有的 CONTINUE (0x003C) 记录数据
+        /// </summary>
+        public System.Collections.Generic.List<byte[]> Continues { get; set; } = new System.Collections.Generic.List<byte[]>();
+
+        /// <summary>
+        /// 拼接基础 Data 和所有 Continues 的数据为一个完整数组
+        /// </summary>
+        public byte[] GetAllData()
+        {
+            if (Data == null) return Array.Empty<byte>();
+            if (Continues.Count == 0) return Data;
+
+            int totalLength = Data.Length;
+            foreach (var chunk in Continues)
+            {
+                totalLength += chunk.Length;
+            }
+
+            byte[] fullData = new byte[totalLength];
+            Array.Copy(Data, 0, fullData, 0, Data.Length);
+            
+            int offset = Data.Length;
+            foreach (var chunk in Continues)
+            {
+                Array.Copy(chunk, 0, fullData, offset, chunk.Length);
+                offset += chunk.Length;
+            }
+            
+            return fullData;
+        }
 
         public static BiffRecord Read(BinaryReader reader)
         {

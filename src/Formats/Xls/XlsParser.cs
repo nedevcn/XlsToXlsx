@@ -135,39 +135,36 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             _stream.Seek(0, SeekOrigin.Begin);
             long streamEnd = _workbookData.Length;
 
+            BiffRecord? previousRecord = null;
+
             while (_stream.Position < streamEnd)
             {
                 try
                 {
                     var record = BiffRecord.Read(_reader);
 
-                    switch (record.Id)
+                    // 自动合并 CONTINUE 记录
+                    if (record.Id == (ushort)BiffRecordType.CONTINUE)
                     {
-                        case (ushort)BiffRecordType.BOF:
-                            break;
-                        case (ushort)BiffRecordType.EOF:
-                            return;
-                        case (ushort)BiffRecordType.SHEET:
-                            ParseSheetRecord(record, workbook);
-                            break;
-                        case (ushort)BiffRecordType.SST:
-                            ParseSstInfo(record, streamEnd);
-                            break;
-                        case (ushort)BiffRecordType.FONT:
-                            ParseFontRecordToGlobal(record);
-                            break;
-                        case (ushort)BiffRecordType.XF:
-                            ParseXfRecordToGlobal(record);
-                            break;
-                        case (ushort)BiffRecordType.FORMAT:
-                            ParseFormatRecordGlobal(record);
-                            break;
-                        case (ushort)BiffRecordType.PALETTE:
-                            ParsePaletteRecordGlobal(record);
-                            break;
-                        case (ushort)BiffRecordType.NAME:
-                            ParseNameRecord(record, workbook);
-                            break;
+                        if (previousRecord != null && record.Data != null)
+                        {
+                            previousRecord.Continues.Add(record.Data);
+                        }
+                        continue;
+                    }
+
+                    // 如果我们遇到一个新记录，先处理前一个记录（因为它现在已经收齐了所有的 CONTINUE 分块）
+                    if (previousRecord != null)
+                    {
+                        ProcessWorkbookGlobalRecord(previousRecord, workbook, streamEnd);
+                    }
+
+                    // 将当前记录设为 Previous，等待下一个循环决定是否遇到它的 CONTINUE
+                    previousRecord = record;
+
+                    if (record.Id == (ushort)BiffRecordType.EOF)
+                    {
+                        break;
                     }
                 }
                 catch (EndOfStreamException)
@@ -183,6 +180,44 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     Logger.Error($"解析Workbook全局记录时发生错误: {ex.Message}", ex);
                     continue;
                 }
+            }
+
+            // 处理最后一个记录
+            if (previousRecord != null && previousRecord.Id != (ushort)BiffRecordType.EOF)
+            {
+                ProcessWorkbookGlobalRecord(previousRecord, workbook, streamEnd);
+            }
+        }
+
+        private void ProcessWorkbookGlobalRecord(BiffRecord record, Workbook workbook, long streamEnd)
+        {
+            switch (record.Id)
+            {
+                case (ushort)BiffRecordType.BOF:
+                    break;
+                case (ushort)BiffRecordType.EOF:
+                    return;
+                case (ushort)BiffRecordType.SHEET:
+                    ParseSheetRecord(record, workbook);
+                    break;
+                case (ushort)BiffRecordType.SST:
+                    ParseSstInfo(record, streamEnd);
+                    break;
+                case (ushort)BiffRecordType.FONT:
+                    ParseFontRecordToGlobal(record);
+                    break;
+                case (ushort)BiffRecordType.XF:
+                    ParseXfRecordToGlobal(record);
+                    break;
+                case (ushort)BiffRecordType.FORMAT:
+                    ParseFormatRecordGlobal(record);
+                    break;
+                case (ushort)BiffRecordType.PALETTE:
+                    ParsePaletteRecordGlobal(record);
+                    break;
+                case (ushort)BiffRecordType.NAME:
+                    ParseNameRecord(record, workbook);
+                    break;
             }
         }
 
@@ -229,18 +264,67 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             long streamEnd = _workbookData.Length;
             Row currentRow = null;
 
+            BiffRecord? previousRecord = null;
+
             while (_stream.Position < streamEnd)
             {
                 try
                 {
                     var record = BiffRecord.Read(_reader);
 
-                    switch (record.Id)
+                    // 自动合并 CONTINUE 记录
+                    if (record.Id == (ushort)BiffRecordType.CONTINUE)
                     {
-                        case (ushort)BiffRecordType.BOF:
-                            break;
-                        case (ushort)BiffRecordType.EOF:
-                            return;
+                        if (previousRecord != null && record.Data != null)
+                        {
+                            previousRecord.Continues.Add(record.Data);
+                        }
+                        continue;
+                    }
+
+                    // Process previous record once all its CONTINUES are fetched
+                    if (previousRecord != null)
+                    {
+                        ProcessWorksheetRecord(previousRecord, worksheet, workbook, ref currentRow, streamEnd);
+                    }
+
+                    previousRecord = record;
+
+                    if (record.Id == (ushort)BiffRecordType.EOF)
+                    {
+                        break;
+                    }
+                }
+                catch (EndOfStreamException)
+                {
+                    break;
+                }
+                catch (XlsToXlsxException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"解析工作表记录时发生错误: {ex.Message}", ex);
+                    continue;
+                }
+            }
+
+            // 处理最后一个记录
+            if (previousRecord != null && previousRecord.Id != (ushort)BiffRecordType.EOF)
+            {
+                ProcessWorksheetRecord(previousRecord, worksheet, workbook, ref currentRow, streamEnd);
+            }
+        }
+
+        private void ProcessWorksheetRecord(BiffRecord record, Worksheet worksheet, Workbook workbook, ref Row currentRow, long streamEnd)
+        {
+            switch (record.Id)
+            {
+                case (ushort)BiffRecordType.BOF:
+                    break;
+                case (ushort)BiffRecordType.EOF:
+                    return;
                         case (ushort)BiffRecordType.DIMENSION:
                             break;
                         case (ushort)BiffRecordType.ROW:
@@ -279,10 +363,11 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             if (currentRow != null && currentRow.Cells.Count > 0)
                             {
                                 var lastCell = currentRow.Cells[currentRow.Cells.Count - 1];
-                                if (record.Data != null && record.Data.Length > 0)
+                                byte[] strData = record.GetAllData();
+                                if (strData.Length > 0)
                                 {
                                     int strOffset = 0;
-                                    lastCell.Value = ReadBiffString(record.Data, ref strOffset);
+                                    lastCell.Value = ReadBiffString(strData, ref strOffset);
                                     lastCell.DataType = "inlineStr";
                                 }
                             }
@@ -341,17 +426,19 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             ParseChartRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.HEADER:
-                            if (record.Data != null && record.Data.Length > 0)
+                            byte[] headerData = record.GetAllData();
+                            if (headerData.Length > 0)
                             {
                                 int hPos = 0;
-                                worksheet.PageSettings.Header = ReadBiffString(record.Data, ref hPos);
+                                worksheet.PageSettings.Header = ReadBiffString(headerData, ref hPos);
                             }
                             break;
                         case (ushort)BiffRecordType.FOOTER:
-                            if (record.Data != null && record.Data.Length > 0)
+                            byte[] footerData = record.GetAllData();
+                            if (footerData.Length > 0)
                             {
                                 int fPos = 0;
-                                worksheet.PageSettings.Footer = ReadBiffString(record.Data, ref fPos);
+                                worksheet.PageSettings.Footer = ReadBiffString(footerData, ref fPos);
                             }
                             break;
                         case (ushort)BiffRecordType.LEFTMARGIN:
@@ -393,24 +480,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         case (ushort)BiffRecordType.FORMAT:
                             ParseFormatRecord(record);
                             break;
-                        case (ushort)BiffRecordType.SST:
-                            ParseSstInfo(record, streamEnd);
-                            break;
-                    }
-                }
-                catch (EndOfStreamException)
-                {
+                case (ushort)BiffRecordType.SST:
+                    ParseSstInfo(record, streamEnd);
                     break;
-                }
-                catch (XlsToXlsxException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"解析工作表记录时发生错误: {ex.Message}", ex);
-                    continue;
-                }
             }
         }
 
@@ -1467,45 +1539,19 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private void ParseSstInfo(BiffRecord record, long workbookStreamEnd)
         {
-            // SST 记录后面可能紧跟多个 CONTINUE 记录
-            using (var ms = new MemoryStream())
+            if (record.Data == null || record.Data.Length < 8) return;
+
+            int uniqueCount = BitConverter.ToInt32(record.Data, 4);
+            _sharedStrings.Capacity = Math.Max(_sharedStrings.Capacity, uniqueCount);
+
+            var stringReader = new BiffStringReader(record, 8); // SST Header size is 8 bytes
+            
+            for (int i = 0; i < uniqueCount; i++)
             {
-                if (record.Data != null)
-                {
-                    ms.Write(record.Data, 0, record.Data.Length);
-                }
-
-                // 连续读取后续的 CONTINUE (0x003C) 记录
-                while (_stream.Position + 4 <= workbookStreamEnd)
-                {
-                    long currentPos = _stream.Position;
-                    ushort nextId = _reader.ReadUInt16();
-                    ushort nextLen = _reader.ReadUInt16();
-
-                    if (nextId == 0x003C) // CONTINUE
-                    {
-                        byte[] contData = _reader.ReadBytes(nextLen);
-                        ms.Write(contData, 0, contData.Length);
-                    }
-                    else
-                    {
-                        // 不是 CONTINUE，回退流位置
-                        _stream.Seek(currentPos, SeekOrigin.Begin);
-                        break;
-                    }
-                }
-
-                byte[] fullData = ms.ToArray();
-                if (fullData.Length < 8) return;
-
-                int uniqueCount = BitConverter.ToInt32(fullData, 4);
-                _sharedStrings.Capacity = Math.Max(_sharedStrings.Capacity, uniqueCount);
-
-                int offset = 8;
-                for (int i = 0; i < uniqueCount && offset < fullData.Length; i++)
-                {
-                    _sharedStrings.Add(ReadBiffString(fullData, ref offset));
-                }
+                string str = stringReader.ReadString();
+                // Depending on file corruption or incorrect counts, the reader might return empty at EOF 
+                // We add it anyway to maintain the index structure, as cells refer to indexes.
+                _sharedStrings.Add(str);
             }
         }
 
@@ -1734,11 +1780,15 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private void ParseFormatRecordGlobal(BiffRecord record)
         {
-            if (record.Data != null && record.Data.Length >= 5)
+            byte[] data = record.GetAllData();
+            if (data.Length >= 2)
             {
-                ushort index = BitConverter.ToUInt16(record.Data, 0);
+                ushort index = BitConverter.ToUInt16(data, 0);
                 int offset = 2;
-                _formats[index] = ReadBiffString(record.Data, ref offset);
+                if (offset < data.Length)
+                {
+                    _formats[index] = ReadBiffString(data, ref offset);
+                }
             }
         }
 
@@ -1800,18 +1850,19 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             // 解析单元格记录
             var cell = new Cell();
             
-            if (record.Data != null && record.Data.Length >= 6)
+            byte[] data = record.GetAllData(); // Use GetAllData for cell records
+            if (data.Length >= 6)
             {
                 // 读取行索引
-                ushort rowIndex = BitConverter.ToUInt16(record.Data, 0);
+                ushort rowIndex = BitConverter.ToUInt16(data, 0);
                 cell.RowIndex = rowIndex + 1; // 转为1-based
                 
                 // 读取列索引（从1开始）
-                ushort colIndex = BitConverter.ToUInt16(record.Data, 2);
+                ushort colIndex = BitConverter.ToUInt16(data, 2);
                 cell.ColumnIndex = colIndex + 1;
                 
                 // 读取样式索引 (XF index)
-                ushort styleIndex = BitConverter.ToUInt16(record.Data, 4);
+                ushort styleIndex = BitConverter.ToUInt16(data, 4);
                 if (styleIndex > 0)
                 {
                     cell.StyleId = styleIndex.ToString();
@@ -1826,10 +1877,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         break;
                     case (ushort)BiffRecordType.CELL_BOOLERR:
                         // BOOLERR 记录：根据标志字节区分布尔值和错误值
-                        if (record.Data.Length >= 8)
+                        if (data.Length >= 8)
                         {
-                            byte valueOrError = record.Data[6];
-                            byte isError = record.Data[7]; // 0 = 布尔值, 1 = 错误值
+                            byte valueOrError = data[6];
+                            byte isError = data[7]; // 0 = 布尔值, 1 = 错误值
                             if (isError == 0)
                             {
                                 cell.Value = valueOrError != 0;
@@ -1844,16 +1895,16 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         break;
                     case (ushort)BiffRecordType.CELL_LABEL:
                         // 文本值 (BIFF8 LABEL record uses XLUnicodeString)
-                        if (record.Data.Length > 6)
+                        if (data.Length > 6)
                         {
                             int offset = 6;
-                            cell.Value = ReadBiffString(record.Data, ref offset);
+                            cell.Value = ReadBiffString(data, ref offset);
                             cell.DataType = "inlineStr";
                         }
                         break;
                     case (ushort)BiffRecordType.CELL_RICH_TEXT:
                         // 富文本值
-                        if (record.Data.Length > 6)
+                        if (data.Length > 6)
                         {
                             // 解析富文本格式
                             cell.RichText = ParseRichText(record.Data, 6);
