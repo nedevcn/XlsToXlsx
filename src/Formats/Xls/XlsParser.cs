@@ -38,6 +38,12 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         private List<byte[]> _msoDrawingData = new List<byte[]>();
         private List<(int Left, int Top, int Width, int Height)> _pendingChartAnchors = new List<(int, int, int, int)>();
 
+        /// <summary>
+        /// XLS 文件打开密码
+        /// </summary>
+        public string Password { get; set; } = "VelvetSweatshop";
+        private XlsDecryptor? _decryptor;
+
         public XlsParser(Stream stream)
         {
             // 验证流是否可读
@@ -148,7 +154,18 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             {
                 try
                 {
+                    var recordStartPos = _stream.Position;
                     var record = BiffRecord.Read(_reader);
+
+                    // 如果已启用解密，且不是特殊的非加密记录
+                    if (_decryptor != null && record.Id != (ushort)BiffRecordType.BOF && record.Id != (ushort)BiffRecordType.FILEPASS)
+                    {
+                        if (record.Data != null && record.Data.Length > 0)
+                        {
+                            // 记录体数据的起始位置是记录头之后的 4 字节
+                            _decryptor.Decrypt(record.Data, recordStartPos + 4);
+                        }
+                    }
 
                     // 自动合并 CONTINUE 记录
                     if (record.Id == (ushort)BiffRecordType.CONTINUE)
@@ -228,6 +245,13 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 case (ushort)BiffRecordType.MSODRAWINGGROUP:
                     ParseMsoDrawingGroupGlobal(record, workbook);
                     break;
+                case (ushort)BiffRecordType.FILEPASS:
+                    if (record.Data != null && record.Data.Length >= 52)
+                    {
+                        Logger.Info("检测到加密文件，正在初始化解密器");
+                        _decryptor = new XlsDecryptor(record.Data, Password);
+                    }
+                    break;
             }
         }
 
@@ -283,7 +307,17 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             {
                 try
                 {
+                    var recordStartPos = _stream.Position;
                     var record = BiffRecord.Read(_reader);
+
+                    // 解密数据体
+                    if (_decryptor != null && record.Id != (ushort)BiffRecordType.BOF)
+                    {
+                        if (record.Data != null && record.Data.Length > 0)
+                        {
+                            _decryptor.Decrypt(record.Data, recordStartPos + 4);
+                        }
+                    }
 
                     // 自动合并 CONTINUE 记录
                     if (record.Id == (ushort)BiffRecordType.CONTINUE)
@@ -2237,7 +2271,17 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             {
                 try
                 {
+                    var recordStartPos = _stream.Position;
                     var record = BiffRecord.Read(_reader);
+
+                    // 解密数据体
+                    if (_decryptor != null && record.Id != (ushort)BiffRecordType.BOF)
+                    {
+                        if (record.Data != null && record.Data.Length > 0)
+                        {
+                            _decryptor.Decrypt(record.Data, recordStartPos + 4);
+                        }
+                    }
 
                     if (record.Id == (ushort)BiffRecordType.CONTINUE)
                     {

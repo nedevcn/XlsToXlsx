@@ -57,6 +57,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         BOF = 0x0809,
         EOF = 0x000A,
         SHEET = 0x0085,        // BOUNDSHEET - 工作表信息
+        FILEPASS = 0x002F,     // 文件加密信息
         
         // Worksheet records - 单元格类型
         ROW = 0x0208,
