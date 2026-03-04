@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Collections.Generic;
 using System;
 using System.Linq;
@@ -9,7 +9,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 {
     public class XlsParser
     {
-        private Stream _stream;
+        private Stream _rawStream;
+        private OleCompoundFile _oleFile;
+        private byte[] _workbookData;  // Workbook 流的完整字节数据
+        private Stream _stream;        // 当前正在解析的流 (MemoryStream wrapper)
         private BinaryReader _reader;
         private List<string> _sharedStrings;
         private List<Font> _fonts = new List<Font>();
@@ -18,6 +21,15 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         private Dictionary<int, string> _palette = new Dictionary<int, string>();
         private Workbook _workbook;
         private const long MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB文件大小限制
+
+        // BOUNDSHEET 记录中的工作表子流偏移量 (lbPlyPos)
+        private List<int> _sheetOffsets = new List<int>();
+
+        /// <summary>
+        /// VBA项目大小限制（字节）
+        /// </summary>
+        public long VbaSizeLimit { get; set; } = 50 * 1024 * 1024;
+        private string _currentCFRange = string.Empty; // 当前条件格式的范围
 
         public XlsParser(Stream stream)
         {
@@ -37,9 +49,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 }
             }
 
-            // 使用BufferedStream提高读取速度
-            _stream = new BufferedStream(stream);
-            _reader = new BinaryReader(_stream);
+            _rawStream = stream;
             _sharedStrings = new List<string>();
         }
 
@@ -52,30 +62,36 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             {
                 Logger.Info("开始解析XLS文件");
 
-                // 解析XLS文件头
-                ParseHeader();
-                Logger.Info("文件头解析完成");
+                // 1. 使用 OleCompoundFile 解析 OLE 复合文件结构
+                _oleFile = new OleCompoundFile(_rawStream);
+                Logger.Info("OLE复合文件解析完成");
 
-                // 解析Compound File Binary格式
-                ParseCompoundFile();
-                Logger.Info("Compound File格式解析完成");
+                // 2. 读取 Workbook 流
+                _workbookData = _oleFile.ReadStreamByName("Workbook")
+                             ?? _oleFile.ReadStreamByName("Book")  // Excel 5.0/95 兼容
+                             ?? throw new XlsParseException("在OLE文件中未找到Workbook或Book流");
+                Logger.Info($"Workbook流读取完成: {_workbookData.Length} 字节");
 
-                // 解析Workbook流
-                ParseWorkbookStream(workbook);
-                Logger.Info("Workbook流解析完成");
+                // 3. 在 Workbook MemoryStream 上解析 BIFF 记录
+                _stream = new MemoryStream(_workbookData);
+                _reader = new BinaryReader(_stream);
 
-                // 解析Worksheet流
-                ParseWorksheetStreams(workbook);
-                Logger.Info("Worksheet流解析完成");
+                // 4. 解析全局记录 (BOUNDSHEET, SST, FONT, XF, FORMAT, PALETTE, NAME)
+                ParseWorkbookGlobals(workbook);
+                Logger.Info($"全局记录解析完成: {workbook.Worksheets.Count} 个工作表, {_sharedStrings.Count} 个共享字符串");
 
-                // 将解析到的全局数据转移到工作簿对象
+                // 5. 根据 BOUNDSHEET 中记录的偏移量解析各工作表子流
+                ParseAllWorksheetSubstreams(workbook);
+                Logger.Info("所有工作表子流解析完成");
+
+                // 6. 将解析到的全局数据转移到工作簿对象
                 workbook.SharedStrings = _sharedStrings;
                 workbook.Fonts = _fonts;
                 workbook.XfList = _xfList;
                 workbook.NumberFormats = _formats;
                 workbook.Palette = _palette;
 
-                // 解析VBA流
+                // 7. 解析VBA流
                 ParseVbaStream(workbook);
                 Logger.Info("VBA流解析完成");
 
@@ -108,1205 +124,234 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             // 使用Task.Run在后台线程中执行解析，避免阻塞主线程
             return await Task.Run(() => Parse());
         }
+        
+        // ===== 全局流解析 =====
 
-        private void ParseHeader()
-        {
-            // 验证文件头
-            var header = _reader.ReadBytes(8);
-            // 检查是否读取到足够的数据
-            if (header.Length < 8)
-            {
-                throw new System.IO.InvalidDataException("Not a valid XLS file: insufficient data for file header");
-            }
-            // 检查是否为BIFF8格式
-            if (header[0] != 0xD0 || header[1] != 0xCF || header[2] != 0x11 || header[3] != 0xE0 ||
-                header[4] != 0xA1 || header[5] != 0xB1 || header[6] != 0x1A || header[7] != 0xE1)
-            {
-                throw new System.IO.InvalidDataException("Not a valid XLS file: invalid file header signature");
-            }
-        }
-
-        private int _sectorSize;
-        
-        private void ParseCompoundFile()
-        {
-            // 读取Compound File Binary格式的头部信息
-            _stream.Seek(0x00, SeekOrigin.Begin);
-            var header = _reader.ReadBytes(512);
-            
-            // 验证文件头
-            if (header[0] != 0xD0 || header[1] != 0xCF || header[2] != 0x11 || header[3] != 0xE0 ||
-                header[4] != 0xA1 || header[5] != 0xB1 || header[6] != 0x1A || header[7] != 0xE1)
-            {
-                throw new System.IO.InvalidDataException("Not a valid Compound File Binary format");
-            }
-            
-            // 读取DIFAT和FAT相关信息
-            _sectorSize = 1 << (header[0x0C] & 0xFF); // 扇区大小
-            int directorySectorStart = BitConverter.ToInt32(header, 0x30); // 目录区起始扇区
-            
-            // 定位到目录区
-            _stream.Seek(directorySectorStart * _sectorSize, SeekOrigin.Begin);
-            
-            // 解析目录条目
-            ParseDirectoryEntries();
-        }
-        
-        private void ParseDirectoryEntries()
-        {
-            // 每个目录条目大小为128字节
-            byte[] entryBuffer = new byte[128];
-            
-            // 持续解析直到遇到空条目或无法读取完整条目
-            int entryCount = 0;
-            const int MAX_ENTRY_COUNT = 1000; // 增加最大条目数限制
-            
-            // 存储所有流类型的条目，用于备用查找
-            List<WorksheetStreamInfo> allStreams = new List<WorksheetStreamInfo>();
-            
-            while (entryCount < MAX_ENTRY_COUNT)
-            {
-                int bytesRead = _reader.Read(entryBuffer, 0, 128);
-                if (bytesRead < 128)
-                    break;
-                
-                // 检查是否为空条目（名称全为0）
-                bool isEmpty = true;
-                for (int j = 0; j < 64; j++)
-                {
-                    if (entryBuffer[j] != 0)
-                    {
-                        isEmpty = false;
-                        break;
-                    }
-                }
-                if (isEmpty)
-                    break;
-                
-                // 读取条目名称（UTF-16LE编码）
-                string name = System.Text.Encoding.Unicode.GetString(entryBuffer, 0, 64).TrimEnd('\0');
-                // 清理名称，移除非打印字符
-                name = new string(name.Where(c => char.IsLetterOrDigit(c) || char.IsPunctuation(c) || char.IsWhiteSpace(c)).ToArray());
-                
-                // 读取条目类型
-                byte entryType = entryBuffer[0x40];
-                
-                // 读取子类型
-                byte entrySubType = entryBuffer[0x41];
-                
-                // 读取起始扇区（无符号整数）
-                uint startSectorUInt = BitConverter.ToUInt32(entryBuffer, 0x44);
-                int startSector = (int)startSectorUInt;
-                
-                // 读取流大小（无符号整数）
-                ulong streamSizeUInt = BitConverter.ToUInt64(entryBuffer, 0x48);
-                long streamSize = (long)streamSizeUInt;
-                
-                // 合理性检查
-                bool isValidStream = true;
-                // 只检查起始扇区是否为负数，不检查大小，因为损坏的文件可能会有异常大的流大小值
-                if (startSector < 0)
-                {
-                    isValidStream = false;
-                }
-                // 对于损坏的文件，我们需要尽可能尝试恢复数据，所以不设置流大小限制
-                // 即使流大小看起来不合理，我们也尝试解析它
-                
-                // 处理流类型和存储类型的条目
-                if (entryType == 1 || entryType == 2) // 1 = Storage, 2 = Stream
-                {
-                    // 记录所有找到的条目
-                    Logger.Info($"找到条目: 名称='{name}', 类型={entryType}, 起始扇区={startSector}, 大小={streamSize}");
-                    
-                    // 检查是否为Workbook
-                    if (name == "Workbook" && isValidStream)
-                    {
-                        // 记录Workbook的位置
-                        _workbookStreamStart = startSector;
-                        _workbookStreamSize = streamSize;
-                        Logger.Info($"找到Workbook流: 起始扇区={startSector}, 大小={streamSize}");
-                    }
-                    
-                    // 检查是否为Worksheet
-                    if ((name.StartsWith("Sheet") || name.StartsWith("Worksheet")) && isValidStream)
-                    {
-                        // 记录Worksheet的位置
-                        _worksheetStreams.Add(new WorksheetStreamInfo
-                        {
-                            Name = name,
-                            StartSector = startSector,
-                            Size = streamSize
-                        });
-                        Logger.Info($"找到Worksheet流: 名称='{name}', 起始扇区={startSector}, 大小={streamSize}");
-                    }
-                    
-                    // 检查是否为其他可能的工作表名称
-                    if (name.Length > 0 && char.IsDigit(name[0]) && isValidStream)
-                    {
-                        // 记录Worksheet的位置
-                        _worksheetStreams.Add(new WorksheetStreamInfo
-                        {
-                            Name = name,
-                            StartSector = startSector,
-                            Size = streamSize
-                        });
-                        Logger.Info($"找到Worksheet流: 名称='{name}', 起始扇区={startSector}, 大小={streamSize}");
-                    }
-                    
-                    // 检查是否为VBA
-                    if ((name == "VBA" || name.StartsWith("VBA/")) && isValidStream)
-                    {
-                        // 记录VBA的位置
-                        _vbaStreamStart = startSector;
-                        _vbaStreamSize = streamSize;
-                        Logger.Info($"找到VBA流: 起始扇区={startSector}, 大小={streamSize}");
-                    }
-                    
-                    // 记录所有流类型的条目，用于备用查找
-                    if (entryType == 2) // 只记录流类型
-                    {
-                        // 过滤掉起始扇区为负数的流，以及大小不合理的流
-                        if (isValidStream)
-                        {
-                            allStreams.Add(new WorksheetStreamInfo
-                            {
-                                Name = name,
-                                StartSector = startSector,
-                                Size = streamSize
-                            });
-                        }
-                    }
-                }
-                
-                entryCount++;
-            }
-            
-            // 如果没有找到Workbook流，尝试从所有流中找到最可能的Workbook流
-            if (_workbookStreamStart == 0 && _workbookStreamSize == 0 && allStreams.Count > 0)
-            {
-                Logger.Info("未找到命名为Workbook的流，尝试从所有流中查找可能的Workbook流");
-                
-                // 找到大小合理的流（Workbook流通常在1KB到10MB之间）
-                var possibleWorkbookStreams = allStreams.Where(s => s.Size > 1024 && s.Size < 10 * 1024 * 1024).ToList();
-                
-                if (possibleWorkbookStreams.Count > 0)
-                {
-                    // 按大小排序，选择最大的一个作为Workbook流
-                    var largestStream = possibleWorkbookStreams.OrderByDescending(s => s.Size).First();
-                    _workbookStreamStart = largestStream.StartSector;
-                    _workbookStreamSize = largestStream.Size;
-                    Logger.Info($"选择最大的流作为Workbook流: 起始扇区={largestStream.StartSector}, 大小={largestStream.Size}");
-                    
-                    // 从剩余的流中查找可能的工作表流
-                    var possibleWorksheetStreams = possibleWorkbookStreams.Where(s => s != largestStream).ToList();
-                    foreach (var stream in possibleWorksheetStreams)
-                    {
-                        _worksheetStreams.Add(stream);
-                        Logger.Info($"添加可能的工作表流: 名称='{stream.Name}', 起始扇区={stream.StartSector}, 大小={stream.Size}");
-                    }
-                }
-                else
-                {
-                    // 尝试从所有流中找到可能的Workbook流，即使大小不合理
-                    Logger.Info("尝试从所有流中找到可能的Workbook流，即使大小不合理");
-                    
-                    // 从所有流中选择一个作为Workbook流
-                    if (allStreams.Count > 0)
-                    {
-                        // 按起始扇区排序，选择起始扇区较小的流作为Workbook流
-                        var sortedStreams = allStreams.OrderBy(s => s.StartSector).ToList();
-                        var selectedStream = sortedStreams.First();
-                        _workbookStreamStart = selectedStream.StartSector;
-                        _workbookStreamSize = selectedStream.Size;
-                        Logger.Info($"选择起始扇区最小的流作为Workbook流: 起始扇区={selectedStream.StartSector}, 大小={selectedStream.Size}");
-                        
-                        // 从剩余的流中查找可能的工作表流
-                        var possibleWorksheetStreams = sortedStreams.Where(s => s != selectedStream).ToList();
-                        foreach (var stream in possibleWorksheetStreams)
-                        {
-                            _worksheetStreams.Add(stream);
-                            Logger.Info($"添加可能的工作表流: 名称='{stream.Name}', 起始扇区={stream.StartSector}, 大小={stream.Size}");
-                        }
-                    }
-                }
-            }
-            
-            // 确保至少有一个工作表
-            if (_worksheetStreams.Count == 0 && allStreams.Count > 0)
-            {
-                Logger.Info("未找到工作表流，尝试从所有流中查找可能的工作表流");
-                
-                // 从所有流中选择一些作为工作表流
-                foreach (var stream in allStreams.Take(3)) // 最多添加3个工作表
-                {
-                    _worksheetStreams.Add(stream);
-                    Logger.Info($"添加可能的工作表流: 名称='{stream.Name}', 起始扇区={stream.StartSector}, 大小={stream.Size}");
-                }
-            }
-        }
-        
-        private long _workbookStreamStart;
-        private long _workbookStreamSize;
-        private List<WorksheetStreamInfo> _worksheetStreams = new List<WorksheetStreamInfo>();
-        private long _vbaStreamStart;
-        private long _vbaStreamSize;
-        
         /// <summary>
-        /// VBA项目大小限制（字节）
+        /// 解析 Workbook 全局子流（从 BOF 到 EOF），收集 BOUNDSHEET/SST/FONT/XF/FORMAT 等全局记录。
         /// </summary>
-        public long VbaSizeLimit { get; set; } = 50 * 1024 * 1024;
-        private string _currentCFRange = string.Empty; // 当前条件格式的范围
-        
-        private class WorksheetStreamInfo
+        private void ParseWorkbookGlobals(Workbook workbook)
         {
-            public string? Name { get; set; }
-            public int StartSector { get; set; }
-            public long Size { get; set; }
-        }
+            _stream.Seek(0, SeekOrigin.Begin);
+            long streamEnd = _workbookData.Length;
 
-        private void ParseWorkbookStream(Workbook workbook)
-        {
-            // 定位到Workbook流
-            _stream.Seek(_workbookStreamStart * _sectorSize, SeekOrigin.Begin);
-
-            // 读取BIFF记录
-            long workbookStreamEnd = _workbookStreamStart * _sectorSize + _workbookStreamSize;
-            while (_stream.Position < workbookStreamEnd && _stream.Position >= 0 && workbookStreamEnd >= 0)
-                {
-                    try
-                    {
-                        var record = BiffRecord.Read(_reader);
-                        
-                        switch (record.Id)
-                        {
-                            case (ushort)BiffRecordType.BOF:
-                                // 开始记录
-                                break;
-                            case (ushort)BiffRecordType.EOF:
-                                // 结束记录
-                                return;
-                            case (ushort)BiffRecordType.SHEET:
-                                // 工作表定义
-                                ParseSheetRecord(record, workbook);
-                                break;
-                            case (ushort)BiffRecordType.SST:
-                                // 共享字符串表（可能包含 CONTINUE 记录）
-                                ParseSstInfo(record, workbookStreamEnd);
-                                break;
-                            case (ushort)BiffRecordType.FONT:
-                                ParseFontRecordToGlobal(record);
-                                break;
-                            case (ushort)BiffRecordType.XF:
-                                ParseXfRecordToGlobal(record);
-                                break;
-                            case (ushort)BiffRecordType.FORMAT:
-                                ParseFormatRecordGlobal(record);
-                                break;
-                            case (ushort)BiffRecordType.PALETTE:
-                                ParsePaletteRecordGlobal(record);
-                                break;
-                            case (ushort)BiffRecordType.NAME:
-                                ParseNameRecord(record, workbook);
-                                break;
-                            default:
-                                // 跳过其他记录
-                                break;
-                        }
-                    }
-                    catch (EndOfStreamException)
-                    {
-                        // 遇到流结束，正常退出循环
-                        break;
-                    }
-                    catch (XlsToXlsxException)
-                    {
-                        // 重新抛出自定义异常
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        // 记录详细的错误信息
-                        Logger.Error($"解析Workbook流时发生错误: {ex.Message}", ex);
-                        // 继续处理下一条记录
-                        continue;
-                    }
-
-                }
-        }
-
-        private object _streamLock = new object();
-        private const int CACHE_SIZE = 65536; // 64KB缓存
-        private const int MAX_ROW_CELLS = 16384; // 最大行单元格数
-        
-        private void ParseWorksheetStreams(Workbook workbook)
-        {
-            // 为每个工作表创建Worksheet对象
-            
-            // 确保工作表数量与流数量匹配
-            while (workbook.Worksheets.Count < _worksheetStreams.Count)
-            {
-                var worksheet = new Worksheet();
-                worksheet.Name = "Sheet" + (workbook.Worksheets.Count + 1);
-                workbook.Worksheets.Add(worksheet);
-            }
-            
-            // 为每个流设置工作表名称
-            for (int i = 0; i < _worksheetStreams.Count; i++)
-            {
-                if (i < workbook.Worksheets.Count)
-                {
-                    var streamInfo = _worksheetStreams[i];
-                    if (!string.IsNullOrEmpty(streamInfo.Name))
-                    {
-                        // 尝试从流名称中提取有意义的工作表名称
-                        string name = streamInfo.Name.Trim();
-                        if (!string.IsNullOrEmpty(name))
-                        {
-                            // 移除特殊字符和控制字符
-                            name = new string(name.Where(c => char.IsLetterOrDigit(c) || c == ' ' || c == '_').ToArray());
-                            if (!string.IsNullOrEmpty(name))
-                            {
-                                workbook.Worksheets[i].Name = name.Length > 31 ? name.Substring(0, 31) : name;
-                            }
-                            else
-                            {
-                                workbook.Worksheets[i].Name = "Sheet" + (i + 1);
-                            }
-                        }
-                        else
-                        {
-                            workbook.Worksheets[i].Name = "Sheet" + (i + 1);
-                        }
-                    }
-                    else
-                    {
-                        workbook.Worksheets[i].Name = "Sheet" + (i + 1);
-                    }
-                }
-            }
-            
-            // 尝试直接从文件中搜索BIFF记录，不依赖于目录条目的信息
-            Logger.Info("尝试直接从文件中搜索BIFF记录");
-            
-            // 限制搜索范围，避免处理整个文件
-            long searchLimit = 500 * 1024 * 1024; // 500MB
-            long fileSize = _stream.Length;
-            long searchEnd = Math.Min(searchLimit, fileSize);
-            
-            // 第一遍扫描: 找到工作簿全局流(BOF type 0x0005)来解析BOUNDSHEET/SST等全局记录
-            // 第二遍扫描: 找到工作表流(BOF type 0x0010)来解析数据
-            long position = 0;
-            bool foundGlobals = false;
-            
-            // 第一遍: 查找并解析工作簿全局流
-            while (position < searchEnd)
+            while (_stream.Position < streamEnd)
             {
                 try
                 {
-                    position = SearchForBofRecord(position, searchEnd);
-                    if (position < 0)
-                        break;
-                    
-                    // 读取BOF记录获取子流类型
-                    ushort subStreamType = 0;
-                    lock (_streamLock)
-                    {
-                        _stream.Seek(position, SeekOrigin.Begin);
-                        var bofRecord = BiffRecord.Read(_reader);
-                        if (bofRecord.Data != null && bofRecord.Data.Length >= 4)
-                        {
-                            subStreamType = BitConverter.ToUInt16(bofRecord.Data, 2);
-                        }
-                    }
-                    
-                    if (subStreamType == 0x0005) // Workbook Globals
-                    {
-                        Logger.Info($"在位置 {position} 找到工作簿全局流");
-                        foundGlobals = true;
-                        
-                        // 清除之前从_worksheetStreams创建的默认工作表
-                        workbook.Worksheets.Clear();
-                        
-                        // 解析全局记录 (BOUNDSHEET, SST, FONT, XF, etc.)
-                        lock (_streamLock)
-                        {
-                            _stream.Seek(position, SeekOrigin.Begin);
-                            BiffRecord.Read(_reader); // skip BOF
-                            long globalsEnd = searchEnd;
-                            while (_stream.Position < globalsEnd)
-                            {
-                                try
-                                {
-                                    var record = BiffRecord.Read(_reader);
-                                    switch (record.Id)
-                                    {
-                                        case (ushort)BiffRecordType.EOF:
-                                            goto doneGlobals;
-                                        case (ushort)BiffRecordType.SHEET:
-                                            ParseSheetRecord(record, workbook);
-                                            break;
-                                        case (ushort)BiffRecordType.SST:
-                                            ParseSstInfo(record, globalsEnd);
-                                            break;
-                                        case (ushort)BiffRecordType.FONT:
-                                            ParseFontRecordToGlobal(record);
-                                            break;
-                                        case (ushort)BiffRecordType.XF:
-                                            ParseXfRecordToGlobal(record);
-                                            break;
-                                        case (ushort)BiffRecordType.FORMAT:
-                                            ParseFormatRecordGlobal(record);
-                                            break;
-                                        case (ushort)BiffRecordType.PALETTE:
-                                            ParsePaletteRecordGlobal(record);
-                                            break;
-                                        case (ushort)BiffRecordType.NAME:
-                                            ParseNameRecord(record, workbook);
-                                            break;
-                                    }
-                                }
-                                catch (EndOfStreamException)
-                                {
-                                    break;
-                                }
-                            }
-                        }
-                        doneGlobals:
-                        Logger.Info($"工作簿全局流解析完成，找到 {workbook.Worksheets.Count} 个工作表定义");
-                        break; // 只需要找第一个全局流
-                    }
-                    
-                    // 不是全局流，跳到下一个位置继续搜索
-                    position += 4;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"搜索工作簿全局流时发生错误", ex);
-                    position += 1024;
-                }
-            }
-            
-            // 第二遍: 查找并解析工作表子流 (BOF type 0x0010)
-            position = 0;
-            int worksheetIndex = 0;
-            
-            while (position < searchEnd && worksheetIndex < Math.Max(workbook.Worksheets.Count, 3))
-            {
-                try
-                {
-                    position = SearchForBofRecord(position, searchEnd);
-                    if (position < 0)
-                        break;
-                    
-                    // 读取BOF记录获取子流类型
-                    ushort subStreamType = 0;
-                    lock (_streamLock)
-                    {
-                        _stream.Seek(position, SeekOrigin.Begin);
-                        var bofRecord = BiffRecord.Read(_reader);
-                        if (bofRecord.Data != null && bofRecord.Data.Length >= 4)
-                        {
-                            subStreamType = BitConverter.ToUInt16(bofRecord.Data, 2);
-                        }
-                    }
-                    
-                    if (subStreamType != 0x0010) // 不是工作表子流
-                    {
-                        // 跳过非工作表BOF（全局流、图表等）
-                        position += 4;
-                        continue;
-                    }
-                    
-                    // 确保有对应的工作表对象
-                    if (worksheetIndex >= workbook.Worksheets.Count)
-                    {
-                        var newWorksheet = new Worksheet();
-                        newWorksheet.Name = "Sheet" + (workbook.Worksheets.Count + 1);
-                        workbook.Worksheets.Add(newWorksheet);
-                    }
-                    
-                    var worksheet = workbook.Worksheets[worksheetIndex];
-                    Logger.Info($"在位置 {position} 找到工作表子流 {worksheet.Name}");
-                    
-                    // 解析从当前位置开始的记录
-                    long endPosition = ParseWorksheetFromPosition(worksheet, position, searchEnd);
-                    if (endPosition > position)
-                    {
-                        position = endPosition;
-                        worksheetIndex++;
-                        Logger.Info($"工作表 {worksheet.Name} 解析完成，共 {worksheet.Rows.Count} 行");
-                    }
-                    else
-                    {
-                        position += 1024;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"搜索BIFF记录时发生错误", ex);
-                    position += 1024;
-                }
-            }
-            
-            // 如果没有找到任何工作表数据，尝试从目录条目指定的流中解析
-            if (worksheetIndex == 0)
-            {
-                Logger.Info("未找到BIFF记录，尝试从目录条目指定的流中解析");
-                
-                // 串行处理工作表流，避免并发问题
-                for (int i = 0; i < _worksheetStreams.Count; i++)
-                {
-                    var streamInfo = _worksheetStreams[i];
-                    // 确保索引不越界
-                    if (i < workbook.Worksheets.Count)
-                    {
-                        var worksheet = workbook.Worksheets[i];
-                    
-                    // 直接使用原始流的位置，避免一次性加载整个工作表数据到内存
-                    long startPosition = streamInfo.StartSector * _sectorSize;
-                    
-                    // 限制流大小，避免处理过大的流导致内存问题
-                    long maxStreamSize = 100 * 1024 * 1024; // 100MB
-                    long streamSize = Math.Min(streamInfo.Size, maxStreamSize);
-                    long endPosition = startPosition + streamSize;
-                    
-                    // 读取BIFF记录
-                    var currentRow = new Row();
-                    currentRow.Cells.Capacity = 100; // 预分配容量
-                    long currentPosition = startPosition;
-                    
-                    // 缓存机制
-                    byte[] buffer = new byte[CACHE_SIZE];
-                    int bufferLength = 0;
-                    int bufferPosition = 0;
-                    
-                    Logger.Info($"开始解析工作表 {worksheet.Name}，起始位置: {startPosition}, 大小: {streamSize}");
-                    
-                    while (currentPosition < endPosition)
-                    {
-                        long remainingBytes = endPosition - currentPosition;
-                        try
-                        {
-                            // 计算剩余数据量
-                            if (remainingBytes < 4) // 至少需要4字节来读取记录ID和长度
-                                break;
-                            
-                            // 读取记录，使用锁确保并发安全
-                            BiffRecord record;
-                            
-                            // 检查缓存是否足够
-                            if (bufferPosition + 4 > bufferLength)
-                            {
-                                // 填充缓存
-                                lock (_streamLock)
-                                {
-                                    _stream.Seek(currentPosition, SeekOrigin.Begin);
-                                    bufferLength = _reader.Read(buffer, 0, Math.Min(CACHE_SIZE, (int)remainingBytes));
-                                    bufferPosition = 0;
-                                }
-                            }
-                            
-                            // 从缓存中读取记录ID和长度
-                            ushort recordId = BitConverter.ToUInt16(buffer, bufferPosition);
-                            ushort recordLength = BitConverter.ToUInt16(buffer, bufferPosition + 2);
-                            bufferPosition += 4;
-                            
-                            // 检查缓存是否足够读取整个记录
-                            if (bufferPosition + recordLength > bufferLength)
-                            {
-                                // 直接从流中读取完整记录
-                                lock (_streamLock)
-                                {
-                                    _stream.Seek(currentPosition, SeekOrigin.Begin);
-                                    record = BiffRecord.Read(_reader);
-                                    currentPosition = _stream.Position;
-                                }
-                            }
-                            else
-                            {
-                                // 从缓存中读取记录数据
-                                byte[] recordData = new byte[recordLength];
-                                Array.Copy(buffer, bufferPosition, recordData, 0, recordLength);
-                                bufferPosition += recordLength;
-                                record = new BiffRecord();
-                                record.Id = recordId;
-                                record.Length = recordLength;
-                                record.Data = recordData;
-                                currentPosition += 4 + recordLength;
-                            }
-                            
-                            switch (record.Id)
-                            {
-                                case (ushort)BiffRecordType.BOF:
-                                    // 开始记录
-                                    break;
-                                case (ushort)BiffRecordType.SST:
-                                    // 共享字符串表
-                                    ParseSstInfo(record, searchEnd);
-                                    break;
-                                case (ushort)BiffRecordType.EOF:
-                                    // 结束记录
-                                    if (currentRow.Cells.Count > 0)
-                                    {
-                                        worksheet.Rows.Add(currentRow);
-                                        if (currentRow.RowIndex > worksheet.MaxRow) worksheet.MaxRow = (int)currentRow.RowIndex;
-                                    }
-                                    goto nextWorksheet;
-                                case (ushort)BiffRecordType.ROW:
-                                    // 行记录
-                                    var parsedRow = ParseRowRecord(record);
-                                    var existingRow = GetOrCreateRow(worksheet, ref currentRow, parsedRow.RowIndex);
-                                    existingRow.Height = parsedRow.Height;
-                                    existingRow.CustomHeight = parsedRow.CustomHeight;
-                                    if (existingRow.RowIndex > worksheet.MaxRow) worksheet.MaxRow = (int)existingRow.RowIndex;
-                                    break;
-                                case (ushort)BiffRecordType.CELL_BLANK:
-                                case (ushort)BiffRecordType.CELL_BOOLERR:
-                                case (ushort)BiffRecordType.CELL_LABEL:
-                                case (ushort)BiffRecordType.CELL_LABELSST:
-                                case (ushort)BiffRecordType.CELL_NUMBER:
-                                case (ushort)BiffRecordType.CELL_RK:
-                                    // 单元格记录
-                                    var cell = ParseCellRecord(record);
-                                    if (cell.ColumnIndex > 0 && cell.ColumnIndex <= 16384)
-                                    {
-                                        var targetRow = GetOrCreateRow(worksheet, ref currentRow, cell.RowIndex);
-                                        targetRow.Cells.Add(cell);
-                                        if (cell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = cell.ColumnIndex;
-                                        if (targetRow.Cells.Count > MAX_ROW_CELLS) Logger.Warn($"行 {targetRow.RowIndex} 单元格数超过限制，可能导致内存问题");
-                                    }
-                                    break;
-                                case (ushort)BiffRecordType.CELL_FORMULA:
-                                    // 公式记录
-                                    var formulaCell = ParseCellRecord(record);
-                                    if (formulaCell.ColumnIndex > 0 && formulaCell.ColumnIndex <= 16384)
-                                    {
-                                        var targetRow = GetOrCreateRow(worksheet, ref currentRow, formulaCell.RowIndex);
-                                        targetRow.Cells.Add(formulaCell);
-                                        if (formulaCell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = formulaCell.ColumnIndex;
-                                    }
-                                    break;
-                                case (ushort)BiffRecordType.STRING:
-                                    // 公式产生的字符串结果记录
-                                    if (currentRow != null && currentRow.Cells.Count > 0)
-                                    {
-                                        var lastCell = currentRow.Cells[currentRow.Cells.Count - 1];
-                                        if (record.Data != null && record.Data.Length > 0)
-                                        {
-                                            int strOffset = 0;
-                                            lastCell.Value = ReadBiffString(record.Data, ref strOffset);
-                                            lastCell.DataType = "inlineStr";
-                                        }
-                                    }
-                                    break;
-                                case (ushort)BiffRecordType.MULRK:
-                                    // 多值RK记录
-                                    ParseMulRkRecord(record, ref currentRow, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.MULBLANK:
-                                    // 多空白单元格记录
-                                    ParseMulBlankRecord(record, ref currentRow, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.MERGECELLS:
-                                    // 合并单元格记录
-                                    ParseMergeCellsRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.PALETTE:
-                                    // 调色板记录已经通过全局解析处理，此处跳过
-                                    break;
-                                case (ushort)BiffRecordType.CHART:
-                                    // 图表记录
-                                    ParseChartRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.CHARTTITLE:
-                                    // 图表标题记录
-                                    ParseChartTitleRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.SERIES:
-                                    // 数据系列记录
-                                    ParseSeriesRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.MSODRAWING:
-                                    // 图片和绘图对象
-                                    ParseMSODrawingRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.PICTURE:
-                                    // 图片记录
-                                    ParsePictureRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.OBJ:
-                                    // 嵌入对象记录
-                                    ParseObjRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.DV:
-                                    // 数据验证记录
-                                    ParseDVRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.CF:
-                                    // 条件格式记录
-                                    ParseCFRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.CFHEADER:
-                                    // 条件格式头部记录
-                                    ParseCFHeaderRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.HYPERLINK:
-                                    // 超链接记录
-                                    ParseHyperlinkRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.COLINFO:
-                                    // 列宽信息
-                                    ParseColInfoRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.DEFCOLWIDTH:
-                                    // 默认列宽
-                                    if (record.Data != null && record.Data.Length >= 2)
-                                        worksheet.DefaultColumnWidth = BitConverter.ToUInt16(record.Data, 0);
-                                    break;
-                                case (ushort)BiffRecordType.DEFAULTROWHEIGHT:
-                                    // 默认行高
-                                    if (record.Data != null && record.Data.Length >= 4)
-                                        worksheet.DefaultRowHeight = BitConverter.ToUInt16(record.Data, 2) / 20.0;
-                                    break;
-                                case (ushort)BiffRecordType.NOTE:
-                                    // 注释记录 (如果需要保留)
-                                    ParseCommentRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.HEADER:
-                                    if (record.Data != null && record.Data.Length >= 1)
-                                    {
-                                        int pos = 0;
-                                        ushort len = record.Data[0];
-                                        pos = 1;
-                                        worksheet.PageSettings.Header = ReadBiffStringFromBytes(record.Data, ref pos, len);
-                                    }
-                                    break;
-                                case (ushort)BiffRecordType.FOOTER:
-                                    if (record.Data != null && record.Data.Length >= 1)
-                                    {
-                                        int pos = 0;
-                                        ushort len = record.Data[0];
-                                        pos = 1;
-                                        worksheet.PageSettings.Footer = ReadBiffStringFromBytes(record.Data, ref pos, len);
-                                    }
-                                    break;
-                                case (ushort)BiffRecordType.LEFTMARGIN:
-                                    if (record.Data != null && record.Data.Length >= 8)
-                                        worksheet.PageSettings.LeftMargin = BitConverter.ToDouble(record.Data, 0);
-                                    break;
-                                case (ushort)BiffRecordType.RIGHTMARGIN:
-                                    if (record.Data != null && record.Data.Length >= 8)
-                                        worksheet.PageSettings.RightMargin = BitConverter.ToDouble(record.Data, 0);
-                                    break;
-                                case (ushort)BiffRecordType.TOPMARGIN:
-                                    if (record.Data != null && record.Data.Length >= 8)
-                                        worksheet.PageSettings.TopMargin = BitConverter.ToDouble(record.Data, 0);
-                                    break;
-                                case (ushort)BiffRecordType.BOTTOMMARGIN:
-                                    if (record.Data != null && record.Data.Length >= 8)
-                                        worksheet.PageSettings.BottomMargin = BitConverter.ToDouble(record.Data, 0);
-                                    break;
-                                case (ushort)BiffRecordType.HCENTER:
-                                    if (record.Data != null && record.Data.Length >= 2)
-                                        worksheet.PageSettings.HorizontalCenter = BitConverter.ToUInt16(record.Data, 0) != 0;
-                                    break;
-                                case (ushort)BiffRecordType.VCENTER:
-                                    if (record.Data != null && record.Data.Length >= 2)
-                                        worksheet.PageSettings.VerticalCenter = BitConverter.ToUInt16(record.Data, 0) != 0;
-                                    break;
-                                case (ushort)BiffRecordType.PAGESETUP:
-                                    ParsePageSetupRecord(record, worksheet);
-                                    break;
-                                case (ushort)BiffRecordType.DIMENSION:
-                                    // 工作表范围 (BIFF8: rwMic(4), rwMac(4), colMic(2), colMac(2))
-                                    if (record.Data != null && record.Data.Length >= 12)
-                                    {
-                                        worksheet.MaxRow = BitConverter.ToInt32(record.Data, 4);
-                                        worksheet.MaxColumn = BitConverter.ToUInt16(record.Data, 10);
-                                    }
-                                    break;
-                                case (ushort)BiffRecordType.WINDOW2:
-                                    // 工作表窗口设置（包含冻结窗格标志）
-                                    ParseWindow2Record(record, worksheet);
-                                    break;
-                                case 0x0041: // PANE 记录
-                                    ParsePaneRecord(record, worksheet);
-                                    break;
-                                default:
-                                    // 跳过其他记录
-                                    break;
-                            }
-                        }
-                        catch (EndOfStreamException)
-                        {
-                            // 遇到流结束，正常退出循环
-                            break;
-                        }
-                        catch (Exception ex)
-                        {
-                            // 记录详细的错误信息
-                            Logger.Error($"解析工作表 {worksheet.Name} 在位置 {currentPosition} 时发生错误", ex);
-                            // 继续处理下一条记录，而不是中断整个工作表的解析
-                            // 计算下一条记录的位置
-                            try
-                            {
-                                lock (_streamLock)
-                                {
-                                    // 尝试跳过当前损坏的记录
-                                    _stream.Seek(currentPosition, SeekOrigin.Begin);
-                                    // 读取记录长度
-                                    if (remainingBytes >= 2)
-                                    {
-                                        short recordLength = _reader.ReadInt16();
-                                        // 跳过记录数据
-                                        currentPosition += 4 + recordLength; // 2字节ID + 2字节长度 + 数据长度
-                                    }
-                                    else
-                                    {
-                                        // 无法读取记录长度，直接退出
-                                        break;
-                                    }
-                                }
-                            }
-                            catch
-                            {
-                                // 如果无法跳过，直接退出
-                                break;
-                        }
-                        }
-                    } // Ends while (currentPosition < endPosition)
-                    
-                    nextWorksheet:
-                        // 处理完一个工作表
-                        Logger.Info($"解析工作表 {worksheet.Name} 完成，共 {worksheet.Rows.Count} 行");
-                    }
-                }
-            }
-        }
+                    var record = BiffRecord.Read(_reader);
 
-        
-        /// <summary>
-        /// 搜索BOF记录
-        /// </summary>
-        /// <param name="startPosition">开始位置</param>
-        /// <param name="endPosition">结束位置</param>
-        /// <returns>找到的BOF记录位置，未找到返回-1</returns>
-        private long SearchForBofRecord(long startPosition, long endPosition)
-        {
-            long position = startPosition;
-            byte[] buffer = new byte[4096];
-            
-            while (position < endPosition)
-            {
-                try
-                {
-                    lock (_streamLock)
-                    {
-                        _stream.Seek(position, SeekOrigin.Begin);
-                        int bytesRead = _reader.Read(buffer, 0, Math.Min(buffer.Length, (int)(endPosition - position)));
-                        if (bytesRead < 4)
-                            break;
-                        
-                        // 搜索BOF记录（0x0009）
-                        for (int i = 0; i < bytesRead - 3; i++)
-                        {
-                            ushort recordId = BitConverter.ToUInt16(buffer, i);
-                            if (recordId == (ushort)BiffRecordType.BOF)
-                            {
-                                return position + i;
-                            }
-                        }
-                    }
-                    
-                    position += buffer.Length - 3;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"搜索BOF记录时发生错误", ex);
-                    position += 1024;
-                }
-            }
-            
-            return -1;
-        }
-        
-        private Row GetOrCreateRow(Worksheet worksheet, ref Row currentRow, int rowIndex)
-    {
-        if (currentRow != null && currentRow.RowIndex == rowIndex)
-            return currentRow;
-            
-        // 倒序查找，因为行通常是顺序添加的，从后往前找最快
-        for (int i = worksheet.Rows.Count - 1; i >= 0; i--)
-        {
-            if (worksheet.Rows[i].RowIndex == rowIndex)
-            {
-                currentRow = worksheet.Rows[i];
-                return currentRow;
-            }
-        }
-        
-        // 找不到则创建新行
-        var newRow = new Row { RowIndex = rowIndex };
-        newRow.Cells.Capacity = 20;
-        worksheet.Rows.Add(newRow);
-        currentRow = newRow;
-        return newRow;
-    }
-
-    /// <summary>
-    /// 从指定位置解析工作表
-        /// </summary>
-        /// <param name="worksheet">工作表对象</param>
-        /// <param name="startPosition">开始位置</param>
-        /// <param name="endPosition">结束位置</param>
-        /// <returns>解析结束的位置</returns>
-        private long ParseWorksheetFromPosition(Worksheet worksheet, long startPosition, long endPosition)
-        {
-            long currentPosition = startPosition;
-            var currentRow = (Row)null; // Initialize to null, GetOrCreateRow will manage it
-            
-            // 缓存机制
-            byte[] buffer = new byte[CACHE_SIZE];
-            int bufferLength = 0;
-            int bufferPosition = 0;
-            
-            while (currentPosition < endPosition)
-            {
-                long remainingBytes = endPosition - currentPosition;
-                try
-                {
-                    // 计算剩余数据量
-                    if (remainingBytes < 4) // 至少需要4字节来读取记录ID和长度
-                        break;
-                    
-                    // 读取记录，使用锁确保并发安全
-                    BiffRecord record;
-                    
-                    // 检查缓存是否足够
-                    if (bufferPosition + 4 > bufferLength)
-                    {
-                        // 填充缓存
-                        lock (_streamLock)
-                        {
-                            _stream.Seek(currentPosition, SeekOrigin.Begin);
-                            bufferLength = _reader.Read(buffer, 0, Math.Min(CACHE_SIZE, (int)remainingBytes));
-                            bufferPosition = 0;
-                        }
-                    }
-                    
-                    // 从缓存中读取记录ID和长度
-                    ushort recordId = BitConverter.ToUInt16(buffer, bufferPosition);
-                    ushort recordLength = BitConverter.ToUInt16(buffer, bufferPosition + 2);
-                    bufferPosition += 4;
-                    
-                    // 检查缓存是否足够读取整个记录
-                    if (bufferPosition + recordLength > bufferLength)
-                    {
-                        // 直接从流中读取完整记录
-                        lock (_streamLock)
-                        {
-                            _stream.Seek(currentPosition, SeekOrigin.Begin);
-                            record = BiffRecord.Read(_reader);
-                            currentPosition = _stream.Position;
-                        }
-                    }
-                    else
-                    {
-                        // 从缓存中读取记录数据
-                        byte[] recordData = new byte[recordLength];
-                        Array.Copy(buffer, bufferPosition, recordData, 0, recordLength);
-                        bufferPosition += recordLength;
-                        record = new BiffRecord();
-                        record.Id = recordId;
-                        record.Length = recordLength;
-                        record.Data = recordData;
-                        currentPosition += 4 + recordLength;
-                    }
-                    
                     switch (record.Id)
                     {
-                        case (ushort)BiffRecordType.EOF:
-                            // 结束记录
-                            return currentPosition;
-                        case (ushort)BiffRecordType.SST:
-                            // 共享字符串表
-                            ParseSstInfo(record, endPosition);
+                        case (ushort)BiffRecordType.BOF:
                             break;
-                    // 行记录
-                    var parsedRow = ParseRowRecord(record);
-                    var existingRow = GetOrCreateRow(worksheet, ref currentRow, parsedRow.RowIndex);
-                    // ROW记录提供了行高信息，更新当前行属性
-                    existingRow.Height = parsedRow.Height;
-                    existingRow.CustomHeight = parsedRow.CustomHeight;
-                    if (existingRow.RowIndex > worksheet.MaxRow) worksheet.MaxRow = (int)existingRow.RowIndex;
-                    break;
-                case (ushort)BiffRecordType.CELL_BLANK:
-                case (ushort)BiffRecordType.CELL_BOOLERR:
-                case (ushort)BiffRecordType.CELL_LABEL:
-                case (ushort)BiffRecordType.CELL_LABELSST:
-                case (ushort)BiffRecordType.CELL_NUMBER:
-                case (ushort)BiffRecordType.CELL_RK:
-                    // 单元格记录
-                    var cell = ParseCellRecord(record);
-                    // 确保列索引有效
-                    if (cell.ColumnIndex >= 1 && cell.ColumnIndex <= 16384) // Excel最大列数
-                    {
-                        var targetRow = GetOrCreateRow(worksheet, ref currentRow, cell.RowIndex);
-                        targetRow.Cells.Add(cell);
-                        if (cell.ColumnIndex > worksheet.MaxColumn)
-                        {
-                            worksheet.MaxColumn = cell.ColumnIndex;
-                        }
-                        if (cell.RowIndex > worksheet.MaxRow)
-                        {
-                            worksheet.MaxRow = cell.RowIndex;
-                        }
-                        // 防止行单元格过多导致内存溢出
-                        if (targetRow.Cells.Count > MAX_ROW_CELLS)
-                        {
-                            Logger.Warn($"行 {targetRow.RowIndex} 单元格数超过限制，可能导致内存问题");
-                        }
-                    }
-                    break;
-                case (ushort)BiffRecordType.CELL_FORMULA:
-                    // 公式记录
-                    var formulaCell = ParseCellRecord(record);
-                    // 确保列索引有效
-                    if (formulaCell.ColumnIndex >= 1 && formulaCell.ColumnIndex <= 16384) // Excel最大列数
-                    {
-                        var targetRow = GetOrCreateRow(worksheet, ref currentRow, formulaCell.RowIndex);
-                        targetRow.Cells.Add(formulaCell);
-                        if (formulaCell.ColumnIndex > worksheet.MaxColumn)
-                        {
-                            worksheet.MaxColumn = formulaCell.ColumnIndex;
-                        }
-                        if (formulaCell.RowIndex > worksheet.MaxRow)
-                        {
-                            worksheet.MaxRow = formulaCell.RowIndex;
-                        }
-                    }
-                    break;
-                case (ushort)BiffRecordType.STRING:
-                    // 公式产生的字符串结果记录
-                    if (currentRow != null && currentRow.Cells.Count > 0)
-                    {
-                        var lastCell = currentRow.Cells[currentRow.Cells.Count - 1];
-                        if (record.Data != null && record.Data.Length > 0)
-                        {
-                            int strOffset = 0;
-                            lastCell.Value = ReadBiffString(record.Data, ref strOffset);
-                            lastCell.DataType = "inlineStr";
-                        }
-                    }
-                    break;
-                case (ushort)BiffRecordType.MULRK:
-                    // 多值RK记录
-                    ParseMulRkRecord(record, ref currentRow, worksheet);
-                    break;
-                case (ushort)BiffRecordType.MULBLANK:
-                    // 多空白单元格记录
-                    ParseMulBlankRecord(record, ref currentRow, worksheet);
-                    break;
-                        case (ushort)BiffRecordType.MERGECELLS:
-                            // 合并单元格记录
-                            ParseMergeCellsRecord(record, worksheet);
+                        case (ushort)BiffRecordType.EOF:
+                            return;
+                        case (ushort)BiffRecordType.SHEET:
+                            ParseSheetRecord(record, workbook);
+                            break;
+                        case (ushort)BiffRecordType.SST:
+                            ParseSstInfo(record, streamEnd);
+                            break;
+                        case (ushort)BiffRecordType.FONT:
+                            ParseFontRecordToGlobal(record);
+                            break;
+                        case (ushort)BiffRecordType.XF:
+                            ParseXfRecordToGlobal(record);
                             break;
                         case (ushort)BiffRecordType.FORMAT:
-                            // 格式记录
-                            ParseFormatRecord(record);
+                            ParseFormatRecordGlobal(record);
                             break;
                         case (ushort)BiffRecordType.PALETTE:
-                            // 全局记录已在Workbook流中处理
+                            ParsePaletteRecordGlobal(record);
                             break;
-                        case (ushort)BiffRecordType.CHART:
-                            // 图表记录
-                            ParseChartRecord(record, worksheet);
+                        case (ushort)BiffRecordType.NAME:
+                            ParseNameRecord(record, workbook);
                             break;
-                        case (ushort)BiffRecordType.CHARTTITLE:
-                            // 图表标题记录
-                            ParseChartTitleRecord(record, worksheet);
+                    }
+                }
+                catch (EndOfStreamException)
+                {
+                    break;
+                }
+                catch (XlsToXlsxException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"解析Workbook全局记录时发生错误: {ex.Message}", ex);
+                    continue;
+                }
+            }
+        }
+
+        // ===== 工作表子流解析 =====
+
+        /// <summary>
+        /// 使用 BOUNDSHEET 记录中的 lbPlyPos 偏移量定位和解析每个工作表子流。
+        /// </summary>
+        private void ParseAllWorksheetSubstreams(Workbook workbook)
+        {
+            for (int i = 0; i < workbook.Worksheets.Count; i++)
+            {
+                if (i >= _sheetOffsets.Count)
+                {
+                    Logger.Warn($"工作表 {i} 没有对应的偏移量信息");
+                    break;
+                }
+
+                int offset = _sheetOffsets[i];
+                if (offset < 0 || offset >= _workbookData.Length)
+                {
+                    Logger.Warn($"工作表 {workbook.Worksheets[i].Name} 的偏移量 {offset} 无效");
+                    continue;
+                }
+
+                try
+                {
+                    _stream.Seek(offset, SeekOrigin.Begin);
+                    ParseWorksheetSubstream(workbook.Worksheets[i], workbook);
+                    Logger.Info($"工作表 {workbook.Worksheets[i].Name} 解析完成: {workbook.Worksheets[i].Rows.Count} 行");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"解析工作表 {workbook.Worksheets[i].Name} 时发生错误", ex);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 解析单个工作表子流（从 BOF 到 EOF）
+        /// </summary>
+        private void ParseWorksheetSubstream(Worksheet worksheet, Workbook workbook)
+        {
+            long streamEnd = _workbookData.Length;
+            Row currentRow = null;
+
+            while (_stream.Position < streamEnd)
+            {
+                try
+                {
+                    var record = BiffRecord.Read(_reader);
+
+                    switch (record.Id)
+                    {
+                        case (ushort)BiffRecordType.BOF:
                             break;
-                        case (ushort)BiffRecordType.SERIES:
-                            // 数据系列记录
-                            ParseSeriesRecord(record, worksheet);
+                        case (ushort)BiffRecordType.EOF:
+                            return;
+                        case (ushort)BiffRecordType.DIMENSION:
                             break;
-                        case (ushort)BiffRecordType.MSODRAWING:
-                            // 图片和绘图对象
-                            ParseMSODrawingRecord(record, worksheet);
+                        case (ushort)BiffRecordType.ROW:
+                            var parsedRow = ParseRowRecord(record);
+                            var existingRow = GetOrCreateRow(worksheet, ref currentRow, parsedRow.RowIndex);
+                            existingRow.Height = parsedRow.Height;
+                            existingRow.CustomHeight = parsedRow.CustomHeight;
+                            if (existingRow.RowIndex > worksheet.MaxRow) worksheet.MaxRow = (int)existingRow.RowIndex;
                             break;
-                        case (ushort)BiffRecordType.PICTURE:
-                            // 图片记录
-                            ParsePictureRecord(record, worksheet);
+                        case (ushort)BiffRecordType.CELL_BLANK:
+                        case (ushort)BiffRecordType.CELL_BOOLERR:
+                        case (ushort)BiffRecordType.CELL_LABEL:
+                        case (ushort)BiffRecordType.CELL_LABELSST:
+                        case (ushort)BiffRecordType.CELL_NUMBER:
+                        case (ushort)BiffRecordType.CELL_RK:
+                            var cell = ParseCellRecord(record);
+                            if (cell.ColumnIndex >= 1 && cell.ColumnIndex <= 16384)
+                            {
+                                var targetRow = GetOrCreateRow(worksheet, ref currentRow, cell.RowIndex);
+                                targetRow.Cells.Add(cell);
+                                if (cell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = cell.ColumnIndex;
+                                if (cell.RowIndex > worksheet.MaxRow) worksheet.MaxRow = cell.RowIndex;
+                            }
                             break;
-                        case (ushort)BiffRecordType.OBJ:
-                            // 嵌入对象记录
-                            ParseObjRecord(record, worksheet);
+                        case (ushort)BiffRecordType.CELL_FORMULA:
+                            var formulaCell = ParseCellRecord(record);
+                            if (formulaCell.ColumnIndex >= 1 && formulaCell.ColumnIndex <= 16384)
+                            {
+                                var targetRow2 = GetOrCreateRow(worksheet, ref currentRow, formulaCell.RowIndex);
+                                targetRow2.Cells.Add(formulaCell);
+                                if (formulaCell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = formulaCell.ColumnIndex;
+                                if (formulaCell.RowIndex > worksheet.MaxRow) worksheet.MaxRow = formulaCell.RowIndex;
+                            }
                             break;
-                        case (ushort)BiffRecordType.DV:
-                            // 数据验证记录
-                            ParseDVRecord(record, worksheet);
+                        case (ushort)BiffRecordType.STRING:
+                            if (currentRow != null && currentRow.Cells.Count > 0)
+                            {
+                                var lastCell = currentRow.Cells[currentRow.Cells.Count - 1];
+                                if (record.Data != null && record.Data.Length > 0)
+                                {
+                                    int strOffset = 0;
+                                    lastCell.Value = ReadBiffString(record.Data, ref strOffset);
+                                    lastCell.DataType = "inlineStr";
+                                }
+                            }
                             break;
-                        case (ushort)BiffRecordType.CF:
-                            // 条件格式记录
-                            ParseCFRecord(record, worksheet);
+                        case (ushort)BiffRecordType.MULRK:
+                            ParseMulRkRecord(record, ref currentRow, worksheet);
                             break;
-                        case (ushort)BiffRecordType.CFHEADER:
-                            // 条件格式头部记录
-                            ParseCFHeaderRecord(record, worksheet);
+                        case (ushort)BiffRecordType.MULBLANK:
+                            ParseMulBlankRecord(record, ref currentRow, worksheet);
                             break;
-                        case (ushort)BiffRecordType.HYPERLINK:
-                            // 超链接记录
-                            ParseHyperlinkRecord(record, worksheet);
+                        case (ushort)BiffRecordType.MERGECELLS:
+                            ParseMergeCellsRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.COLINFO:
-                            // 列宽信息
                             ParseColInfoRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.DEFCOLWIDTH:
-                            // 默认列宽
                             if (record.Data != null && record.Data.Length >= 2)
                                 worksheet.DefaultColumnWidth = BitConverter.ToUInt16(record.Data, 0);
                             break;
                         case (ushort)BiffRecordType.DEFAULTROWHEIGHT:
-                            // 默认行高
                             if (record.Data != null && record.Data.Length >= 4)
                                 worksheet.DefaultRowHeight = BitConverter.ToUInt16(record.Data, 2) / 20.0;
                             break;
-                        case (ushort)BiffRecordType.DIMENSION:
-                            // 工作表范围
-                            if (record.Data != null && record.Data.Length >= 12)
-                            {
-                                worksheet.MaxRow = BitConverter.ToInt32(record.Data, 4);
-                                worksheet.MaxColumn = BitConverter.ToUInt16(record.Data, 10);
-                            }
-                            break;
                         case (ushort)BiffRecordType.WINDOW2:
-                            // 工作表窗口设置（包含冻结窗格标志）
                             ParseWindow2Record(record, worksheet);
                             break;
-                        case 0x0041: // PANE 记录
+                        case 0x0041: // PANE
                             ParsePaneRecord(record, worksheet);
                             break;
+                        case (ushort)BiffRecordType.DV:
+                            ParseDVRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.CFHEADER:
+                            ParseCFHeaderRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.CF:
+                            ParseCFRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.HYPERLINK:
+                            ParseHyperlinkRecord(record, worksheet);
+                            break;
                         case (ushort)BiffRecordType.NOTE:
-                            // 注释记录 (如果需要保留)
                             ParseCommentRecord(record, worksheet);
                             break;
+                        case (ushort)BiffRecordType.MSODRAWING:
+                            ParseMSODrawingRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.PICTURE:
+                            ParsePictureRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.OBJ:
+                            ParseObjRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.CHART:
+                            ParseChartRecord(record, worksheet);
+                            break;
                         case (ushort)BiffRecordType.HEADER:
-                            if (record.Data != null && record.Data.Length >= 1)
+                            if (record.Data != null && record.Data.Length > 0)
                             {
-                                int pos = 0;
-                                ushort len = record.Data[0];
-                                pos = 1;
-                                worksheet.PageSettings.Header = ReadBiffStringFromBytes(record.Data, ref pos, len);
+                                int hPos = 0;
+                                worksheet.PageSettings.Header = ReadBiffString(record.Data, ref hPos);
                             }
                             break;
                         case (ushort)BiffRecordType.FOOTER:
-                            if (record.Data != null && record.Data.Length >= 1)
+                            if (record.Data != null && record.Data.Length > 0)
                             {
-                                int pos = 0;
-                                ushort len = record.Data[0];
-                                pos = 1;
-                                worksheet.PageSettings.Footer = ReadBiffStringFromBytes(record.Data, ref pos, len);
+                                int fPos = 0;
+                                worksheet.PageSettings.Footer = ReadBiffString(record.Data, ref fPos);
                             }
                             break;
                         case (ushort)BiffRecordType.LEFTMARGIN:
@@ -1336,54 +381,65 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         case (ushort)BiffRecordType.PAGESETUP:
                             ParsePageSetupRecord(record, worksheet);
                             break;
-                        default:
-                            // 跳过其他记录
+                        case (ushort)BiffRecordType.FONT:
+                            ParseFontRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.XF:
+                            ParseXfRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.PALETTE:
+                            ParsePaletteRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.FORMAT:
+                            ParseFormatRecord(record);
+                            break;
+                        case (ushort)BiffRecordType.SST:
+                            ParseSstInfo(record, streamEnd);
                             break;
                     }
                 }
                 catch (EndOfStreamException)
                 {
-                    // 遇到流结束，正常退出循环
                     break;
+                }
+                catch (XlsToXlsxException)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    // 记录详细的错误信息
-                    Logger.Error($"解析工作表在位置 {currentPosition} 时发生错误", ex);
-                    // 继续处理下一条记录，而不是中断整个工作表的解析
-                    // 计算下一条记录的位置
-                    try
-                    {
-                        lock (_streamLock)
-                        {
-                            // 尝试跳过当前损坏的记录
-                            _stream.Seek(currentPosition, SeekOrigin.Begin);
-                            // 读取记录长度
-                            if (remainingBytes >= 2)
-                            {
-                                short recordLength = _reader.ReadInt16();
-                                // 跳过记录数据
-                                currentPosition += 4 + recordLength; // 2字节ID + 2字节长度 + 数据长度
-                            }
-                            else
-                            {
-                                // 无法读取记录长度，直接退出
-                                break;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // 如果无法跳过，直接退出
-                        break;
-                    }
+                    Logger.Error($"解析工作表记录时发生错误: {ex.Message}", ex);
+                    continue;
                 }
             }
+        }
+
+
+        // ===== 以下为辅助方法 =====
+        private Row GetOrCreateRow(Worksheet worksheet, ref Row currentRow, int rowIndex)
+    {
+        if (currentRow != null && currentRow.RowIndex == rowIndex)
+            return currentRow;
             
-            return currentPosition;
+        // 倒序查找，因为行通常是顺序添加的，从后往前找最快
+        for (int i = worksheet.Rows.Count - 1; i >= 0; i--)
+        {
+            if (worksheet.Rows[i].RowIndex == rowIndex)
+            {
+                currentRow = worksheet.Rows[i];
+                return currentRow;
+            }
         }
         
-        private void ParseFormatRecord(BiffRecord record)
+        // 找不到则创建新行
+        var newRow = new Row { RowIndex = rowIndex };
+        newRow.Cells.Capacity = 20;
+        worksheet.Rows.Add(newRow);
+        currentRow = newRow;
+        return newRow;
+    }
+    
+    private void ParseFormatRecord(BiffRecord record)
         {
             // 解析格式记录
             if (record.Data != null && record.Data.Length >= 18)
@@ -2370,14 +1426,21 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private void ParseSheetRecord(BiffRecord record, Workbook workbook)
         {
-            // 解析工作表记录
+            // 解析工作表记录 (BOUNDSHEET / 0x0085)
             var worksheet = new Worksheet();
             
-            // 从记录数据中提取工作表名称
             if (record.Data != null && record.Data.Length >= 8)
             {
-                // BIFF8 BoundSheet 记录包含流位置(4) + 类型(1) + 隐藏标志(1) + 名称
-                // 名称是 ShortXLUnicodeString (1 byte len + 1 byte option + data)
+                // BIFF8 BoundSheet 记录:
+                //   Offset 0-3: lbPlyPos (工作表子流在 Workbook 流内的绝对偏移量)
+                //   Offset 4:   hsState (隐藏状态: 0=可见, 1=隐藏, 2=非常规隐藏)
+                //   Offset 5:   dt (工作表类型)
+                //   Offset 6+:  名称 (ShortXLUnicodeString)
+                int lbPlyPos = BitConverter.ToInt32(record.Data, 0);
+                _sheetOffsets.Add(lbPlyPos);
+                Logger.Debug($"BOUNDSHEET: lbPlyPos={lbPlyPos}");
+
+                // 提取工作表名称
                 int nameOffset = 6;
                 if (record.Data.Length > nameOffset)
                 {
@@ -2385,6 +1448,12 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     int pos = nameOffset + 1;
                     worksheet.Name = ReadBiffStringFromBytes(record.Data, ref pos, len);
                 }
+            }
+            else if (record.Data != null && record.Data.Length >= 4)
+            {
+                // 至少有 lbPlyPos
+                int lbPlyPos = BitConverter.ToInt32(record.Data, 0);
+                _sheetOffsets.Add(lbPlyPos);
             }
             
             // 如果没有提取到名称，使用默认名称
@@ -3031,55 +2100,49 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         
         private void ParseVbaStream(Workbook workbook)
         {
-            // 解析VBA流
-            if (_vbaStreamStart > 0 && _vbaStreamSize > 0)
+            // 使用 OleCompoundFile 查找 VBA 项目
+            try
             {
-                try
+                // 尝试常见的 VBA 存储路径
+                byte[]? vbaData = _oleFile.ReadStreamByName("_VBA_PROJECT_CUR")
+                               ?? _oleFile.ReadStreamByName("VBA");
+
+                if (vbaData == null)
                 {
-                    // 验证VBA流大小
-                    if (_vbaStreamSize > VbaSizeLimit)
+                    // 尝试在目录中搜索包含 VBA 的条目
+                    var entries = _oleFile.DirectoryEntries;
+                    foreach (var entry in entries)
                     {
-                        Logger.Warn($"VBA项目大小超过{VbaSizeLimit / (1024 * 1024)}MB限制，可能导致转换失败");
-                    }
-                    
-                    // 定位到VBA流
-                    _stream.Seek(_vbaStreamStart * _sectorSize, SeekOrigin.Begin);
-                    
-                    // 读取VBA流数据
-                    byte[] vbaData = new byte[_vbaStreamSize];
-                    int bytesRead = _reader.Read(vbaData, 0, (int)_vbaStreamSize);
-                    if (bytesRead == _vbaStreamSize)
-                    {
-                        // 验证VBA流头部
-                        if (vbaData.Length >= 8)
+                        if (entry.Name != null && 
+                            entry.Name.IndexOf("VBA", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                            entry.ObjectType == DirectoryEntryType.Stream &&
+                            entry.StreamSize > 0)
                         {
-                            // 检查VBA流头部签名
-                            uint signature = BitConverter.ToUInt32(vbaData, 0);
-                            if (signature == 0x61CC61CC) // VBA流签名
+                            vbaData = _oleFile.ReadStream(entry);
+                            if (vbaData != null && vbaData.Length > 0)
                             {
-                                workbook.VbaProject = vbaData;
-                                Logger.Info($"成功解析VBA项目，大小: {vbaData.Length} 字节");
-                            }
-                            else
-                            {
-                                Logger.Warn("VBA流头部签名无效，跳过VBA项目");
+                                Logger.Info($"找到VBA流: {entry.Name}, 大小: {vbaData.Length}");
+                                break;
                             }
                         }
-                        else
-                        {
-                            Logger.Warn("VBA流数据太短，跳过VBA项目");
-                        }
-                    }
-                    else
-                    {
-                        Logger.Warn($"VBA流读取不完整，预期: {_vbaStreamSize} 字节，实际: {bytesRead} 字节");
                     }
                 }
-                catch (Exception ex)
+
+                if (vbaData != null && vbaData.Length > 0)
                 {
-                    Logger.Error("解析VBA流时发生错误", ex);
-                    // 继续执行，不影响其他部分的解析
+                    if (vbaData.Length > VbaSizeLimit)
+                    {
+                        Logger.Warn($"VBA项目大小超过{VbaSizeLimit / (1024 * 1024)}MB限制");
+                        return;
+                    }
+
+                    workbook.VbaProject = vbaData;
+                    Logger.Info($"成功读取VBA项目，大小: {vbaData.Length} 字节");
                 }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("解析VBA流时发生错误", ex);
             }
         }
 
