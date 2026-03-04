@@ -340,6 +340,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         case (ushort)BiffRecordType.CELL_LABELSST:
                         case (ushort)BiffRecordType.CELL_NUMBER:
                         case (ushort)BiffRecordType.CELL_RK:
+                        case (ushort)BiffRecordType.CELL_RSTRING: // 旧版富文本
                             var cell = ParseCellRecord(record);
                             if (cell.ColumnIndex >= 1 && cell.ColumnIndex <= 16384)
                             {
@@ -358,6 +359,11 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                                 if (formulaCell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = formulaCell.ColumnIndex;
                                 if (formulaCell.RowIndex > worksheet.MaxRow) worksheet.MaxRow = formulaCell.RowIndex;
                             }
+                            break;
+                        case (ushort)BiffRecordType.ARRAY:
+                        case (ushort)BiffRecordType.SHAREDFMLA:
+                            // 数组公式和共享公式紧跟着 FORMULA。其计算值已经在 FORMULA 记录中提取并缓存，
+                            // 此处安全忽略其具体的公式解析，确保数据不丢失。
                             break;
                         case (ushort)BiffRecordType.STRING:
                             if (currentRow != null && currentRow.Cells.Count > 0)

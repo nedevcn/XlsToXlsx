@@ -67,7 +67,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         CELL_NUMBER = 0x0203,
         CELL_RK = 0x027E,
         CELL_FORMULA = 0x0006, // 公式记录
+        ARRAY = 0x0221,        // 数组公式
+        SHAREDFMLA = 0x04BC,   // 共享公式
         STRING = 0x0207,       // 公式字符串缓存记录
+        CELL_RSTRING = 0x00D6, // 旧版富文本或带格式文本
         MULRK = 0x00BD,        // 多值RK记录（连续数值单元格）
         MULBLANK = 0x00BE,     // 多空白单元格记录
         MERGECELLS = 0x00E5,   // 合并单元格记录
