@@ -58,6 +58,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         EOF = 0x000A,
         SHEET = 0x0085,        // BOUNDSHEET - 工作表信息
         FILEPASS = 0x002F,     // 文件加密信息
+        EXTERNSHEET = 0x0017,  // 外部引用映射记录
+        EXTERNBOOK = 0x01AE,   // 外部工作簿引用 (SUPBOOK)
+        EXTERNALNAME = 0x0023, // 外部名称记录
         
         // Worksheet records - 单元格类型
         ROW = 0x0208,

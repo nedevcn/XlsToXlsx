@@ -75,6 +75,14 @@ namespace Nedev.XlsToXlsx
         /// 填充列表
         /// </summary>
         public List<Fill> Fills { get; set; } = new List<Fill>();
+        /// <summary>
+        /// 外部工作簿引用列表
+        /// </summary>
+        public List<ExternalBook> ExternalBooks { get; set; } = new List<ExternalBook>();
+        /// <summary>
+        /// 外部工作表引用索引表
+        /// </summary>
+        public List<ExternalSheet> ExternalSheets { get; set; } = new List<ExternalSheet>();
     }
 
     /// <summary>
@@ -1015,6 +1023,28 @@ namespace Nedev.XlsToXlsx
         /// 填充索引
         /// </summary>
         public int FillIndex { get; set; }
+    }
+
+    /// <summary>
+    /// 外部工作簿引用
+    /// </summary>
+    public class ExternalBook
+    {
+        public string? FileName { get; set; }
+        public List<string> SheetNames { get; set; } = new List<string>();
+        public List<string> ExternalNames { get; set; } = new List<string>();
+        public bool IsSelf { get; set; } // 指向当前工作簿
+        public bool IsAddIn { get; set; }
+    }
+
+    /// <summary>
+    /// 外部工作表引用（映射索引）
+    /// </summary>
+    public class ExternalSheet
+    {
+        public int ExternalBookIndex { get; set; }
+        public int FirstSheetIndex { get; set; }
+        public int LastSheetIndex { get; set; }
     }
 
     /// <summary>

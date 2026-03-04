@@ -252,6 +252,15 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         _decryptor = new XlsDecryptor(record.Data, Password);
                     }
                     break;
+                case (ushort)BiffRecordType.EXTERNBOOK:
+                    ParseExternBookRecord(record, workbook);
+                    break;
+                case (ushort)BiffRecordType.EXTERNSHEET:
+                    ParseExternSheetRecord(record, workbook);
+                    break;
+                case (ushort)BiffRecordType.EXTERNALNAME:
+                    ParseExternalNameRecord(record, workbook);
+                    break;
             }
         }
 
@@ -2407,6 +2416,84 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 return palColor.Replace("#", "");
                 
             return null;
+        }
+
+        private void ParseExternBookRecord(BiffRecord record, Workbook workbook)
+        {
+            if (record.Data != null && record.Data.Length >= 4)
+            {
+                ushort count = BitConverter.ToUInt16(record.Data, 0);
+                ushort type = BitConverter.ToUInt16(record.Data, 2);
+                
+                var extBook = new ExternalBook();
+                
+                if (type == 0x0401)
+                {
+                    extBook.IsSelf = true;
+                    Logger.Info("找到内部引用 (Self SUPBOOK)");
+                }
+                else if (type == 0x3A01)
+                {
+                    extBook.IsAddIn = true;
+                    Logger.Info("找到 Add-In 引用");
+                }
+                else
+                {
+                    // 外部文件路径
+                    int offset = 2;
+                    // SUPBOOK 的路径字符串前通常是一个字节的字符数
+                    byte pathLen = record.Data[offset];
+                    offset++;
+                    extBook.FileName = ReadBiffStringFromBytes(record.Data, ref offset, pathLen);
+                    Logger.Info($"找到外部工作簿引用: {extBook.FileName}");
+                }
+                
+                workbook.ExternalBooks.Add(extBook);
+            }
+        }
+
+        private void ParseExternSheetRecord(BiffRecord record, Workbook workbook)
+        {
+            if (record.Data != null && record.Data.Length >= 2)
+            {
+                ushort count = BitConverter.ToUInt16(record.Data, 0);
+                
+                for (int i = 0; i < count; i++)
+                {
+                    int offset = 2 + i * 6;
+                    if (offset + 6 <= record.Data.Length)
+                    {
+                        var extSheet = new ExternalSheet
+                        {
+                            ExternalBookIndex = BitConverter.ToUInt16(record.Data, offset),
+                            FirstSheetIndex = BitConverter.ToInt16(record.Data, offset + 2),
+                            LastSheetIndex = BitConverter.ToInt16(record.Data, offset + 4)
+                        };
+                        workbook.ExternalSheets.Add(extSheet);
+                    }
+                }
+                Logger.Info($"解析 EXTERNSHEET, 共有 {count} 个引用映射");
+            }
+        }
+
+        private void ParseExternalNameRecord(BiffRecord record, Workbook workbook)
+        {
+            if (record.Data != null && record.Data.Length >= 6)
+            {
+                // BIFF8 EXTERNALNAME
+                ushort options = BitConverter.ToUInt16(record.Data, 0);
+                byte nameLen = record.Data[3];
+                
+                int offset = 6;
+                string name = ReadBiffStringFromBytes(record.Data, ref offset, nameLen);
+                
+                if (workbook.ExternalBooks.Count > 0)
+                {
+                    workbook.ExternalBooks[workbook.ExternalBooks.Count - 1].ExternalNames.Add(name);
+                }
+                
+                Logger.Info($"找到外部工作簿名称引用: {name}");
+            }
         }
 
         private string GetPatternType(byte patternId)
