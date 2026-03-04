@@ -44,6 +44,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         public string Password { get; set; } = "VelvetSweatshop";
         private XlsDecryptor? _decryptor;
 
+        // 数据透视表解析状态
+        private PivotTable? _currentPivotTable;
+
         public XlsParser(Stream stream)
         {
             // 验证流是否可读
@@ -566,6 +569,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             break;
                         case (ushort)BiffRecordType.FORMAT:
                             ParseFormatRecord(record);
+                            break;
+                        case (ushort)BiffRecordType.SXVIEW:
+                        case (ushort)BiffRecordType.SXVD:
+                        case (ushort)BiffRecordType.SXVI:
+                        case (ushort)BiffRecordType.SXDX:
+                        case (ushort)BiffRecordType.SXFIELD:
+                        case (ushort)BiffRecordType.SXPI:
+                            ParsePivotTableRecord(record, worksheet);
                             break;
                 case (ushort)BiffRecordType.SST:
                     ParseSstInfo(record, streamEnd);
@@ -2493,6 +2504,99 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 }
                 
                 Logger.Info($"找到外部工作簿名称引用: {name}");
+            }
+        }
+
+        private void ParsePivotTableRecord(BiffRecord record, Worksheet worksheet)
+        {
+            if (record.Data == null) return;
+
+            switch (record.Id)
+            {
+                case (ushort)BiffRecordType.SXVIEW:
+                    // SXVIEW (0x00B0) - 开始一个新的数据透视表
+                    if (record.Data.Length >= 16)
+                    {
+                        var pivotTable = new PivotTable();
+                        int offset = 16; 
+                        // SXVIEW 中的表名由一个两字节的字符数开始 (BIFF8)
+                        if (offset + 2 <= record.Data.Length)
+                        {
+                            ushort nameLen = BitConverter.ToUInt16(record.Data, offset);
+                            offset += 2;
+                            pivotTable.Name = ReadBiffStringFromBytes(record.Data, ref offset, nameLen);
+                        }
+                        
+                        _currentPivotTable = pivotTable;
+                        worksheet.PivotTables.Add(pivotTable);
+                        Logger.Info($"开始解析数据透视表: {pivotTable.Name}");
+                    }
+                    break;
+
+                case (ushort)BiffRecordType.SXVD:
+                    // SXVD (0x00B1) - 字段属性
+                    if (_currentPivotTable != null && record.Data.Length >= 2)
+                    {
+                        ushort sxaxis = BitConverter.ToUInt16(record.Data, 0);
+                        var field = new PivotField();
+                        
+                        // sxaxis: 0=no axis, 1=row, 2=col, 4=page, 8=data
+                        if ((sxaxis & 0x01) != 0) field.Type = "row";
+                        else if ((sxaxis & 0x02) != 0) field.Type = "column";
+                        else if ((sxaxis & 0x04) != 0) field.Type = "page";
+                        else if ((sxaxis & 0x08) != 0) field.Type = "data";
+                        
+                        if (field.Type == "row") _currentPivotTable.RowFields.Add(field);
+                        else if (field.Type == "column") _currentPivotTable.ColumnFields.Add(field);
+                        else if (field.Type == "page") _currentPivotTable.PageFields.Add(field);
+                        else if (field.Type == "data") _currentPivotTable.DataFields.Add(field);
+                    }
+                    break;
+
+                case (ushort)BiffRecordType.SXDX:
+                    // SXDX (0x00C6) - 数据字段的具体信息
+                    if (_currentPivotTable != null && _currentPivotTable.DataFields.Count > 0)
+                    {
+                        var lastDataField = _currentPivotTable.DataFields[_currentPivotTable.DataFields.Count - 1];
+                        if (record.Data.Length >= 4)
+                        {
+                            ushort iSubtotal = BitConverter.ToUInt16(record.Data, 2);
+                            // 0=Sum, 1=Count, 2=Average, etc.
+                            string[] funcs = { "sum", "count", "average", "max", "min", "product", "countNums", "stdDev", "stdDevp", "var", "varp" };
+                            if (iSubtotal < funcs.Length) lastDataField.Function = funcs[iSubtotal];
+                        }
+                    }
+                    break;
+
+                case (ushort)BiffRecordType.SXFIELD:
+                    // SXFIELD (0x00CA) - 字段名称及属性
+                    if (_currentPivotTable != null && record.Data.Length >= 4)
+                    {
+                        int offset = 4;
+                        // BIFF8 SXFIELD name starts with 2-byte char count
+                        if (offset + 2 <= record.Data.Length)
+                        {
+                            ushort cch = BitConverter.ToUInt16(record.Data, offset);
+                            offset += 2;
+                            string fieldName = ReadBiffStringFromBytes(record.Data, ref offset, cch);
+                            // 这里暂时无法完美回填，因为字段关联逻辑较复杂（通常按顺序）
+                            // 简单起见，如果字段列表非空，回填到最后一个未命名的字段
+                            var allFields = _currentPivotTable.RowFields
+                                .Concat(_currentPivotTable.ColumnFields)
+                                .Concat(_currentPivotTable.PageFields)
+                                .Concat(_currentPivotTable.DataFields);
+                            
+                            foreach (var f in allFields)
+                            {
+                                if (string.IsNullOrEmpty(f.Name))
+                                {
+                                    f.Name = fieldName;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    break;
             }
         }
 

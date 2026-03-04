@@ -129,6 +129,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         NOTE = 0x001C,           // 注释/批注记录 (BIFF8 NOTE)
         CELL_RICH_TEXT = 0x00D1, // 富文本记录
 
+        // 数据透视表记录
+        SXVIEW = 0x00B0,         // 数据透视表视图属性
+        SXVD = 0x00B1,           // 数据透视表字段属性
+        SXVI = 0x00B2,           // 数据透视表项
+        SXDX = 0x00C6,           // 数据透视表数据字段
+        SXFIELD = 0x00CA,        // 数据透视表字段信息
+        SXPI = 0x00B7,           // 数据透视表页项
+
         // P3 新增: 打印设置与命名区域
         NAME = 0x0018,           // 命名区域
         HEADER = 0x0014,         // 页眉
