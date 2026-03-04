@@ -82,7 +82,7 @@ namespace Nedev.XlsToXlsx
             }
 
             // 确保输出目录存在
-            string outputDirectory = Path.GetDirectoryName(outputFilePath);
+            string? outputDirectory = Path.GetDirectoryName(outputFilePath);
             if (!string.IsNullOrEmpty(outputDirectory) && !Directory.Exists(outputDirectory))
             {
                 Directory.CreateDirectory(outputDirectory);
@@ -167,7 +167,7 @@ namespace Nedev.XlsToXlsx
             }
 
             // 确保输出目录存在
-            string outputDirectory = Path.GetDirectoryName(outputFilePath);
+            string? outputDirectory = Path.GetDirectoryName(outputFilePath);
             if (!string.IsNullOrEmpty(outputDirectory) && !Directory.Exists(outputDirectory))
             {
                 Directory.CreateDirectory(outputDirectory);

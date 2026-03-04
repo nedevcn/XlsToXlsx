@@ -6,14 +6,14 @@ namespace Nedev.XlsToXlsx
     public static class Logger
     {
         public static LogLevel LogLevel { get; set; } = LogLevel.Info;
-        private static StreamWriter _logWriter;
+        private static StreamWriter? _logWriter;
 
         static Logger()
         {
             // 默认输出到控制台
         }
 
-        public static void Initialize(string logFilePath = null)
+        public static void Initialize(string? logFilePath = null)
         {
             if (!string.IsNullOrEmpty(logFilePath))
             {
@@ -28,7 +28,7 @@ namespace Nedev.XlsToXlsx
             }
         }
 
-        public static void Log(LogLevel level, string message, Exception ex = null)
+        public static void Log(LogLevel level, string message, Exception? ex = null)
         {
             if (level < LogLevel) return;
 
@@ -75,12 +75,12 @@ namespace Nedev.XlsToXlsx
             Warning(message);
         }
 
-        public static void Error(string message, Exception ex = null)
+        public static void Error(string message, Exception? ex = null)
         {
             Log(LogLevel.Error, message, ex);
         }
 
-        public static void Fatal(string message, Exception ex = null)
+        public static void Fatal(string message, Exception? ex = null)
         {
             Log(LogLevel.Fatal, message, ex);
         }

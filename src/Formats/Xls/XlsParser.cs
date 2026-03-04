@@ -10,16 +10,16 @@ namespace Nedev.XlsToXlsx.Formats.Xls
     public class XlsParser
     {
         private Stream _rawStream;
-        private OleCompoundFile _oleFile;
-        private byte[] _workbookData;  // Workbook 流的完整字节数据
-        private Stream _stream;        // 当前正在解析的流 (MemoryStream wrapper)
-        private BinaryReader _reader;
+        private OleCompoundFile _oleFile = null!;
+        private byte[] _workbookData = null!;  // Workbook 流的完整字节数据
+        private Stream _stream = null!;        // 当前正在解析的流 (MemoryStream wrapper)
+        private BinaryReader _reader = null!;
         private List<string> _sharedStrings;
         private List<Font> _fonts = new List<Font>();
         private List<Xf> _xfList = new List<Xf>();
         private Dictionary<ushort, string> _formats = new Dictionary<ushort, string>();
         private Dictionary<int, string> _palette = new Dictionary<int, string>();
-        private Workbook _workbook;
+        private Workbook _workbook = null!;
         private const long MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB文件大小限制
 
         // 工作簿级别的OfficeArt (DggContainer bytes)
@@ -311,7 +311,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             _pendingChartAnchors.Clear();
             
             long streamEnd = _workbookData.Length;
-            Row currentRow = null;
+            Row? currentRow = null;
 
             BiffRecord? previousRecord = null;
 
@@ -344,7 +344,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     // Process previous record once all its CONTINUES are fetched
                     if (previousRecord != null)
                     {
-                        ProcessWorksheetRecord(previousRecord, worksheet, workbook, ref currentRow, streamEnd);
+                        ProcessWorksheetRecord(previousRecord, worksheet, workbook, ref currentRow!, streamEnd);
                     }
 
                     previousRecord = record;
@@ -372,7 +372,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             // 处理最后一个记录
             if (previousRecord != null && previousRecord.Id != (ushort)BiffRecordType.EOF)
             {
-                ProcessWorksheetRecord(previousRecord, worksheet, workbook, ref currentRow, streamEnd);
+                ProcessWorksheetRecord(previousRecord, worksheet, workbook, ref currentRow!, streamEnd);
             }
             
             // 在遇到工作表 EOF 后，检查紧随其后的子流是否为图表子流 (BOF type = 0x0020)
@@ -1935,7 +1935,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         if (data.Length > 6)
                         {
                             // 解析富文本格式
-                            cell.RichText = ParseRichText(record.Data, 6);
+                            cell.RichText = ParseRichText(record.Data ?? Array.Empty<byte>(), 6);
                             cell.DataType = "inlineStr";
                             // 同时设置Value为纯文本，确保兼容性
                             cell.Value = string.Join("", cell.RichText.Select(r => r.Text));
@@ -2282,7 +2282,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             long streamEnd = _workbookData.Length;
             BiffRecord? previousRecord = null;
             Chart currentChart = new Chart();
-            Series currentSeries = null;
+            Series? currentSeries = null;
             
             // 默认图表类型
             currentChart.ChartType = "colChart";
@@ -2314,7 +2314,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
                     if (previousRecord != null)
                     {
-                        ProcessChartRecord(previousRecord, currentChart, ref currentSeries, worksheet);
+                        ProcessChartRecord(previousRecord, currentChart, ref currentSeries!, worksheet);
                     }
 
                     previousRecord = record;
@@ -2337,7 +2337,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
             if (previousRecord != null && previousRecord.Id != (ushort)BiffRecordType.EOF)
             {
-                ProcessChartRecord(previousRecord, currentChart, ref currentSeries, worksheet);
+                ProcessChartRecord(previousRecord, currentChart, ref currentSeries!, worksheet);
             }
             
             // 确保图表有默认轴和图例

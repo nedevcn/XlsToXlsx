@@ -11,7 +11,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls.Escher
         public int Instance { get; set; }
         public int Type { get; set; }
         public int Length { get; set; }
-        public byte[] Data { get; set; }
+        public byte[]? Data { get; set; }
         public List<EscherRecord> Children { get; set; } = new List<EscherRecord>();
 
         public bool IsContainer => Version == 0x0F;
