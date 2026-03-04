@@ -83,16 +83,26 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         BORDER = 0x00B2,         // 边框记录
         FILL = 0x00F5,           // 填充记录
         
-        // 图表记录
-        CHART = 0x003D,         // 图表记录
-        CHARTTITLE = 0x003E,    // 图表标题
-        SERIES = 0x0040,        // 数据系列
-        AXIS = 0x0041,          // 坐标轴
+        // 图表记录 (BIFF8 Chart Substream)
+        CHARTFORMAT = 0x1014,   // 图表格式记录 (Start of chart)
+        CHARTSERIES = 0x1003,   // 图表数据系列
+        CHARTTITLE = 0x1025,    // 图表标题
+        CHARTLEGEND = 0x1015,   // 图表图例
+        CHARTAXIS = 0x101D,     // 坐标轴
+        CHARTLINEFORMAT = 0x1007, // 线条格式
+        CHARTAREA = 0x101A,     // 图表区/绘图区
+        CHARTMARKERFORMAT = 0x1009, // 标记格式
+        CHART3D = 0x103A,       // 3D 图表标志
+        CHARTFORMATLINK = 0x1022,   // 链接到文本
+        SERIESTEXT = 0x100D,    // 系列文本/标题
+        CHARTEND = 0x1033,      // Chart结束标
+        BRAI = 0x1051,          // 系列数据引用
         
         // 图片和嵌入对象
-        MSODRAWING = 0x00EC,    // 图片和绘图对象 (Escher记录)
-        PICTURE = 0x0074,       // 图片记录
-        OBJ = 0x005D,           // 嵌入对象
+        MSODRAWINGGROUP = 0x00EB, // Office Art 绘图全局(包含DggContainer)
+        MSODRAWING = 0x00EC,      // 图片和绘图对象 (Escher记录)
+        PICTURE = 0x0074,         // 图片记录
+        OBJ = 0x005D,             // 嵌入对象
         
         // 数据验证和条件格式
         DV = 0x01B2,            // 数据验证

@@ -22,6 +22,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         private Workbook _workbook;
         private const long MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB文件大小限制
 
+        // 工作簿级别的OfficeArt (DggContainer bytes)
+        private List<byte[]> _msoDrawingGroupData = new List<byte[]>();
+
         // BOUNDSHEET 记录中的工作表子流偏移量 (lbPlyPos)
         private List<int> _sheetOffsets = new List<int>();
 
@@ -30,6 +33,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         /// </summary>
         public long VbaSizeLimit { get; set; } = 50 * 1024 * 1024;
         private string _currentCFRange = string.Empty; // 当前条件格式的范围
+
+        // 画图对象状态
+        private List<byte[]> _msoDrawingData = new List<byte[]>();
+        private List<(int Left, int Top, int Width, int Height)> _pendingChartAnchors = new List<(int, int, int, int)>();
 
         public XlsParser(Stream stream)
         {
@@ -218,6 +225,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 case (ushort)BiffRecordType.NAME:
                     ParseNameRecord(record, workbook);
                     break;
+                case (ushort)BiffRecordType.MSODRAWINGGROUP:
+                    ParseMsoDrawingGroupGlobal(record, workbook);
+                    break;
             }
         }
 
@@ -261,6 +271,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         /// </summary>
         private void ParseWorksheetSubstream(Worksheet worksheet, Workbook workbook)
         {
+            _msoDrawingData.Clear();
+            _pendingChartAnchors.Clear();
+            
             long streamEnd = _workbookData.Length;
             Row currentRow = null;
 
@@ -314,6 +327,34 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             if (previousRecord != null && previousRecord.Id != (ushort)BiffRecordType.EOF)
             {
                 ProcessWorksheetRecord(previousRecord, worksheet, workbook, ref currentRow, streamEnd);
+            }
+            
+            // 在遇到工作表 EOF 后，检查紧随其后的子流是否为图表子流 (BOF type = 0x0020)
+            while (_stream.Position < streamEnd)
+            {
+                long posBeforePeek = _stream.Position;
+                try
+                {
+                    var nextRecord = BiffRecord.Read(_reader);
+                    if (nextRecord.Id == (ushort)BiffRecordType.BOF && nextRecord.Data != null && nextRecord.Data.Length >= 4)
+                    {
+                        ushort bofType = BitConverter.ToUInt16(nextRecord.Data, 2);
+                        if (bofType == 0x0020) // 图表子流
+                        {
+                            Logger.Info($"在工作表 {worksheet.Name} 后发现图表子流，开始解析");
+                            ParseChartSubstream(worksheet, workbook);
+                            continue; // 图表子流解析完毕后，继续检查是否还有其他图表子流附在该工作表后面
+                        }
+                    }
+                }
+                catch
+                {
+                    // 无法读取或到达流末尾
+                }
+                
+                // 如果不是图表子流，恢复指针位置并退出
+                _stream.Position = posBeforePeek;
+                break;
             }
         }
 
@@ -427,9 +468,6 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             break;
                         case (ushort)BiffRecordType.OBJ:
                             ParseObjRecord(record, worksheet);
-                            break;
-                        case (ushort)BiffRecordType.CHART:
-                            ParseChartRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.HEADER:
                             byte[] headerData = record.GetAllData();
@@ -825,174 +863,107 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             }
         }
         
-        private void ParseChartRecord(BiffRecord record, Worksheet worksheet)
-        {
-            // 解析图表记录
-            var chart = new Chart();
-            // 默认为柱状图
-            chart.ChartType = "barChart";
-            
-            // 解析图表类型
-            if (record.Data != null && record.Data.Length >= 2)
-            {
-                ushort chartType = BitConverter.ToUInt16(record.Data, 0);
-                chart.ChartType = GetChartType(chartType);
-            }
-            
-            // 解析图表位置和大小
-            if (record.Data != null && record.Data.Length >= 18)
-            {
-                // BIFF8 uses 4 byte integers (2+16 offset bytes typically for this sub-record)
-                // Simplified fallback extraction trying to avoid breaking existing layout assumptions
-                chart.Left = BitConverter.ToInt16(record.Data, 2);
-                chart.Top = BitConverter.ToInt16(record.Data, 6);
-                chart.Width = BitConverter.ToInt16(record.Data, 10);
-                chart.Height = BitConverter.ToInt16(record.Data, 14);
-            }
-            
-            // 添加默认图例
-            chart.Legend = new Legend
-            {
-                Visible = true,
-                Position = "right"
-            };
-            
-            // 添加默认坐标轴
-            chart.XAxis = new Axis
-            {
-                Visible = true,
-                Title = "X轴",
-                NumberFormat = "General"
-            };
-            
-            chart.YAxis = new Axis
-            {
-                Visible = true,
-                Title = "Y轴",
-                NumberFormat = "General"
-            };
-            
-            worksheet.Charts.Add(chart);
-        }
-        
-        private void ParseChartTitleRecord(BiffRecord record, Worksheet worksheet)
-        {
-            // 解析图表标题记录
-            if (worksheet.Charts.Count > 0 && record.Data != null)
-            {
-                var chart = worksheet.Charts[worksheet.Charts.Count - 1];
-                // 读取标题字符串
-                string title = System.Text.Encoding.ASCII.GetString(record.Data);
-                chart.Title = title.Trim();
-            }
-        }
-        
-        private void ParseSeriesRecord(BiffRecord record, Worksheet worksheet)
-        {
-            // 解析数据系列记录
-            if (worksheet.Charts.Count > 0 && record.Data != null)
-            {
-                var chart = worksheet.Charts[worksheet.Charts.Count - 1];
-                var series = new Series();
-                
-                // 读取系列名称
-                if (record.Data.Length >= 2)
-                {
-                    ushort nameLength = BitConverter.ToUInt16(record.Data, 0);
-                    if (nameLength > 0 && nameLength + 2 <= record.Data.Length)
-                    {
-                        string seriesName = System.Text.Encoding.ASCII.GetString(record.Data, 2, nameLength);
-                        series.Name = seriesName.Trim();
-                    }
-                }
-                
-                // 解析值范围和类别范围
-                if (record.Data.Length >= 6)
-                {
-                    // 读取值范围
-                    ushort valuesOffset = BitConverter.ToUInt16(record.Data, 2 + (record.Data[2] > 0 ? record.Data[2] : 0));
-                    if (valuesOffset > 0 && valuesOffset < record.Data.Length)
-                    {
-                        string valuesRange = ParseRange(record.Data, valuesOffset);
-                        if (!string.IsNullOrEmpty(valuesRange))
-                        {
-                            series.ValuesRange = valuesRange;
-                        }
-                    }
-                    
-                    // 读取类别范围
-                    ushort categoriesOffset = BitConverter.ToUInt16(record.Data, 4 + (record.Data[2] > 0 ? record.Data[2] : 0));
-                    if (categoriesOffset > 0 && categoriesOffset < record.Data.Length)
-                    {
-                        string categoriesRange = ParseRange(record.Data, categoriesOffset);
-                        if (!string.IsNullOrEmpty(categoriesRange))
-                        {
-                            series.CategoriesRange = categoriesRange;
-                        }
-                    }
-                }
-                
-                // 如果没有解析到范围，使用默认值
-                if (string.IsNullOrEmpty(series.ValuesRange))
-                {
-                    series.ValuesRange = $"{worksheet.Name}!$B$2:$B$6";
-                }
-                if (string.IsNullOrEmpty(series.CategoriesRange))
-                {
-                    series.CategoriesRange = $"{worksheet.Name}!$A$2:$A$6";
-                }
-                
-                // 添加默认系列样式
-                series.LineStyle = new LineStyle
-                {
-                    Width = 2
-                };
-                
-                chart.Series.Add(series);
-            }
-        }
-        
-        private string ParseRange(byte[] data, int offset)
-        {
-            // 解析范围字符串
-            if (offset + 2 <= data.Length)
-            {
-                ushort length = BitConverter.ToUInt16(data, offset);
-                if (length > 0 && offset + 2 + length <= data.Length)
-                {
-                    string range = System.Text.Encoding.ASCII.GetString(data, offset + 2, length).Trim();
-                    return range;
-                }
-            }
-            return string.Empty;
-        }
-        
-        private string GetChartType(ushort chartType)
-        {
-            // 映射BIFF8图表类型到OpenXML图表类型
-            switch (chartType)
-            {
-                case 0: return "barChart";
-                case 1: return "colChart";
-                case 2: return "lineChart";
-                case 3: return "pieChart";
-                case 4: return "scatterChart";
-                case 5: return "areaChart";
-                case 6: return "doughnutChart";
-                case 7: return "radarChart";
-                case 8: return "surfaceChart";
-                case 9: return "bubbleChart";
-                case 10: return "stockChart";
-                default: return "colChart";
-            }
-        }
-        
+
         private void ParseMSODrawingRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析图片和绘图对象记录
-            // 这里只是简单地识别记录，实际解析需要更复杂的逻辑
+            // 收集绘图数据以供后续 OBJ 记录使用
+            if (record.Data != null && record.Data.Length > 0)
+            {
+                _msoDrawingData.Add(record.GetAllData());
+            }
+        }
+
+        private void ParseMsoDrawingGroupGlobal(BiffRecord record, Workbook workbook)
+        {
+            // 收集全局绘图数据
+            if (record.Data != null && record.Data.Length > 0)
+            {
+                _msoDrawingGroupData.Add(record.GetAllData());
+            }
         }
         
+        private void ParseObjRecord(BiffRecord record, Worksheet worksheet)
+        {
+            // 解析对象记录，包括图表容器
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 4) return;
+            
+            // Obj Type is at offset 4 usually, but Obj record format is a series of subrecords (ftCmo=0x15)
+            // subrecord ftCmo usually comes first: cmoId(2), cb(2), ot(2), id(2), options(2)
+            ushort ft = BitConverter.ToUInt16(data, 0);
+            if (ft == 0x0015 && data.Length >= 10) // ftCmo
+            {
+                ushort objType = BitConverter.ToUInt16(data, 4);
+                if (objType == 0x0005) // Chart Data
+                {
+                    // 尝试从最近的 MsoDrawing 中读取 ClientAnchor
+                    try
+                    {
+                        if (_msoDrawingData.Count > 0)
+                        {
+                            // 合并最后收集的一批 MsoDrawing 数据
+                            int totalLen = _msoDrawingData.Sum(d => d.Length);
+                            byte[] drawingData = new byte[totalLen];
+                            int offset = 0;
+                            foreach (var d in _msoDrawingData)
+                            {
+                                Array.Copy(d, 0, drawingData, offset, d.Length);
+                                offset += d.Length;
+                            }
+                            
+                            var escherRecords = Escher.EscherParser.ParseStream(drawingData);
+                            // 在记录中查找 ClientAnchor (0xF010)
+                            var anchor = FindClientAnchor(escherRecords);
+                            if (anchor != null && anchor.Data.Length >= 16)
+                            {
+                                // ClientAnchor 的数据格式解析。其实是行列+偏移，这里用简化数据表示
+                                // 实际图表左上角/右下角为行列，为了与现有模型兼容，暂时记录索引
+                                int left = BitConverter.ToUInt16(anchor.Data, 6); // dxL
+                                int top = BitConverter.ToUInt16(anchor.Data, 10); // dyT
+                                int width = 500; // placeholder
+                                int height = 300; // placeholder
+                                _pendingChartAnchors.Add((left, top, width, height));
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"解析 OBJ / Chart Anchor 失败: {ex.Message}", ex);
+                    }
+                    finally
+                    {
+                        _msoDrawingData.Clear(); // 清理，避免与其他对象混淆
+                    }
+                }
+                else
+                {
+                    _msoDrawingData.Clear();
+                    
+                    // 原先的 ParseObjRecord 逻辑：作为普通的 EmbeddedObject 解析
+                    var embeddedObject = new EmbeddedObject();
+                    embeddedObject.Data = new byte[data.Length];
+                    Array.Copy(data, embeddedObject.Data, data.Length);
+                    embeddedObject.MimeType = "application/octet-stream";
+                    worksheet.EmbeddedObjects.Add(embeddedObject);
+                }
+            }
+        }
+
+        private Escher.EscherRecord? FindClientAnchor(IEnumerable<Escher.EscherRecord> records)
+        {
+            foreach (var record in records)
+            {
+                if (record.Type == Escher.EscherParser.ClientAnchor)
+                    return record;
+                
+                if (record.IsContainer && record.Children.Count > 0)
+                {
+                    var result = FindClientAnchor(record.Children);
+                    if (result != null) return result;
+                }
+            }
+            return null;
+        }
         private void ParsePictureRecord(BiffRecord record, Worksheet worksheet)
         {
             // 解析图片记录
@@ -1106,20 +1077,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 }
             }
         }
-        
-        private void ParseObjRecord(BiffRecord record, Worksheet worksheet)
-        {
-            // 解析嵌入对象记录
-            if (record.Data != null)
-            {
-                var embeddedObject = new EmbeddedObject();
-                // 读取对象数据
-                embeddedObject.Data = new byte[record.Data.Length];
-                Array.Copy(record.Data, embeddedObject.Data, record.Data.Length);
-                embeddedObject.MimeType = "application/octet-stream"; // 默认为二进制流
-                worksheet.EmbeddedObjects.Add(embeddedObject);
-            }
-        }
+
         
         private void ParseDVRecord(BiffRecord record, Worksheet worksheet)
         {
@@ -1908,6 +1866,16 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             cell.DataType = "inlineStr";
                         }
                         break;
+                    case (ushort)BiffRecordType.CELL_RSTRING:
+                        // 旧版带格式文本或富文本
+                        if (data.Length > 8)
+                        {
+                            // cch (2 bytes) + grbit (1 byte) ...
+                            int offset = 6;
+                            cell.Value = ReadBiffString(data, ref offset);
+                            cell.DataType = "inlineStr";
+                        }
+                        break;
                     case (ushort)BiffRecordType.CELL_RICH_TEXT:
                         // 富文本值
                         if (data.Length > 6)
@@ -2252,6 +2220,112 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 ushort options = BitConverter.ToUInt16(record.Data, 10);
                 ps.OrientationLandscape = (options & 0x0002) == 0;
                 ps.UsePageNumbers = (options & 0x0001) != 0;
+            }
+        }
+
+        private void ParseChartSubstream(Worksheet worksheet, Workbook workbook)
+        {
+            long streamEnd = _workbookData.Length;
+            BiffRecord? previousRecord = null;
+            Chart currentChart = new Chart();
+            Series currentSeries = null;
+            
+            // 默认图表类型
+            currentChart.ChartType = "colChart";
+
+            while (_stream.Position < streamEnd)
+            {
+                try
+                {
+                    var record = BiffRecord.Read(_reader);
+
+                    if (record.Id == (ushort)BiffRecordType.CONTINUE)
+                    {
+                        if (previousRecord != null && record.Data != null)
+                        {
+                            previousRecord.Continues.Add(record.Data);
+                        }
+                        continue;
+                    }
+
+                    if (previousRecord != null)
+                    {
+                        ProcessChartRecord(previousRecord, currentChart, ref currentSeries, worksheet);
+                    }
+
+                    previousRecord = record;
+
+                    if (record.Id == (ushort)BiffRecordType.EOF)
+                    {
+                        break;
+                    }
+                }
+                catch (EndOfStreamException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"解析图表记录时发生错误: {ex.Message}", ex);
+                    continue;
+                }
+            }
+
+            if (previousRecord != null && previousRecord.Id != (ushort)BiffRecordType.EOF)
+            {
+                ProcessChartRecord(previousRecord, currentChart, ref currentSeries, worksheet);
+            }
+            
+            // 确保图表有默认轴和图例
+            if (currentChart.XAxis == null) currentChart.XAxis = new Axis { Visible = true, Title = "X轴" };
+            if (currentChart.YAxis == null) currentChart.YAxis = new Axis { Visible = true, Title = "Y轴" };
+            if (currentChart.Legend == null) currentChart.Legend = new Legend { Visible = true, Position = "right" };
+            
+            // 应用等待分配的坐标信息
+            if (_pendingChartAnchors.Count > worksheet.Charts.Count)
+            {
+                var anchor = _pendingChartAnchors[worksheet.Charts.Count];
+                currentChart.Left = anchor.Left;
+                currentChart.Top = anchor.Top;
+            }
+
+            worksheet.Charts.Add(currentChart);
+            Logger.Info($"成功向工作表 {worksheet.Name} 添加了 1 个图表 (类型: {currentChart.ChartType}, 系列数: {currentChart.Series.Count})");
+        }
+
+        private void ProcessChartRecord(BiffRecord record, Chart chart, ref Series currentSeries, Worksheet worksheet)
+        {
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length == 0) return;
+
+            switch (record.Id)
+            {
+                case 0x1017: // Bar
+                    chart.ChartType = "barChart";
+                    break;
+                case 0x1018: // Line
+                    chart.ChartType = "lineChart";
+                    break;
+                case 0x1019: // Pie
+                    chart.ChartType = "pieChart";
+                    break;
+                case 0x101B: // Scatter
+                    chart.ChartType = "scatterChart";
+                    break;
+                case 0x101A: // Area
+                    chart.ChartType = "areaChart";
+                    break;
+                case 0x1020: // Radar
+                    chart.ChartType = "radarChart";
+                    break;
+                case (ushort)BiffRecordType.CHARTSERIES:
+                    currentSeries = new Series();
+                    // 添加默认范围，实际公式解析较复杂
+                    currentSeries.ValuesRange = $"{worksheet.Name}!$B$2:$B$6";
+                    currentSeries.CategoriesRange = $"{worksheet.Name}!$A$2:$A$6";
+                    currentSeries.LineStyle = new LineStyle { Width = 2 };
+                    chart.Series.Add(currentSeries);
+                    break;
             }
         }
 
