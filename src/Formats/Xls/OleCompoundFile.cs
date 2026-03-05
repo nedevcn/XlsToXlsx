@@ -85,12 +85,15 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     throw new InvalidDataException("无效的 OLE 复合文件签名");
             }
 
-            // 扇区大小: 2^(header[0x1E:0x1F])
+            // 扇区大小: 2^(header[0x1E:0x1F])，仅支持 512 (2^9) 或 4096 (2^12)
             ushort sectorShift = BitConverter.ToUInt16(header, 0x1E);
+            if (sectorShift != 9 && sectorShift != 12)
+                sectorShift = 9;
             _sectorSize = 1 << sectorShift;
 
-            // Mini 扇区大小: 2^(header[0x20:0x21])
+            // Mini 扇区大小: 2^(header[0x20:0x21])，通常 64，防止异常值
             ushort miniSectorShift = BitConverter.ToUInt16(header, 0x20);
+            if (miniSectorShift > 31) miniSectorShift = 6;
             _miniSectorSize = 1 << miniSectorShift;
 
             // FAT 扇区总数
@@ -215,9 +218,11 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     continue;
                 }
 
-                // 名称长度（字节数，包含终止符）
+                // 名称长度（字节数，包含终止符）；MS-CFB 目录名最多 32 个 UTF-16 码元 = 64 字节，防止异常值越界
                 ushort nameLen = BitConverter.ToUInt16(directoryData, offset + 0x40);
-                int nameBytesToDecode = Math.Max(0, nameLen - 2); // 去掉 null terminator
+                int nameBytesToDecode = Math.Max(0, nameLen <= 2 ? 0 : Math.Min(nameLen - 2, 62));
+                if (offset + nameBytesToDecode > directoryData.Length)
+                    nameBytesToDecode = Math.Max(0, directoryData.Length - offset);
                 string name = nameBytesToDecode > 0
                     ? Encoding.Unicode.GetString(directoryData, offset, nameBytesToDecode)
                     : string.Empty;
@@ -393,6 +398,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         /// </summary>
         private byte[] ReadSectorRaw(int sectorId)
         {
+            if (sectorId < 0)
+                return new byte[_sectorSize];
             long offset = HEADER_SIZE + (long)sectorId * _sectorSize;
             _stream.Seek(offset, SeekOrigin.Begin);
             byte[] data = new byte[_sectorSize];
@@ -419,6 +426,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         private byte[] ReadStreamFromFat(int startSector, long maxSize)
         {
             if (startSector < 0 || (uint)startSector >= ENDOFCHAIN)
+                return Array.Empty<byte>();
+            if (_fat == null || _fat.Length == 0)
                 return Array.Empty<byte>();
 
             // 收集扇区链

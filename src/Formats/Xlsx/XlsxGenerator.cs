@@ -757,6 +757,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteStartElement("cols");
                     foreach (var colInfo in worksheet.ColumnInfos)
                     {
+                        if (colInfo == null) continue;
                         writer.WriteStartElement("col");
                         writer.WriteAttributeString("min", (colInfo.FirstColumn + 1).ToString()); // 1-based
                         writer.WriteAttributeString("max", (colInfo.LastColumn + 1).ToString());
@@ -949,6 +950,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     
                     foreach (var mergeCell in worksheet.MergeCells)
                     {
+                        if (mergeCell == null) continue;
                         writer.WriteStartElement("mergeCell");
                         string refValue = GetCellReference(mergeCell.StartRow, mergeCell.StartColumn) + ":" + 
                                          GetCellReference(mergeCell.EndRow, mergeCell.EndColumn);
@@ -1048,6 +1050,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     
                     foreach (var dv in worksheet.DataValidations)
                     {
+                        if (dv == null) continue;
                         writer.WriteStartElement("dataValidation");
                         if (!string.IsNullOrEmpty(dv.Range))
                         {
@@ -1179,6 +1182,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     for (int i = 0; i < worksheet.Hyperlinks.Count; i++)
                     {
                         var hyperlink = worksheet.Hyperlinks[i];
+                        if (hyperlink == null) continue;
                         writer.WriteStartElement("Relationship");
                         writer.WriteAttributeString("Id", "rIdHL" + (i + 1));
                         writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink");
@@ -1236,6 +1240,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 int shapeIndex = 1025;
                 foreach (var comment in worksheet.Comments)
                 {
+                    if (comment == null) continue;
                     string cellRef = GetCellReference(comment.RowIndex, comment.ColumnIndex);
                     
                     writer.WriteStartElement("shape", "urn:schemas-microsoft-com:vml");
@@ -1334,7 +1339,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             List<Font> fonts = new List<Font>();
             
             // 优先添加从XLS文件解析的全局字体
-            foreach (var font in workbook.Fonts)
+            foreach (var font in workbook.Fonts ?? Enumerable.Empty<Font>())
             {
                 if (!fonts.Any(f => 
                     f.Name == font.Name && 
@@ -1592,7 +1597,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteStartElement("cellXfs");
                     
                     // 使用解析出的 Xf 列表，或者如果为空则使用默认
-                    List<Xf> xfs = workbook.XfList.Count > 0 ? workbook.XfList : new List<Xf> { new Xf() };
+                    List<Xf> xfs = (workbook.XfList != null && workbook.XfList.Count > 0) ? workbook.XfList : new List<Xf> { new Xf() };
                     
                     Logger.Info($"写入 styles.xml: fonts={workbook.Fonts.Count}, fills={fills.Count}, borders={borders.Count}, xfs={xfs.Count}");
                     writer.WriteAttributeString("count", xfs.Count.ToString());
@@ -2448,8 +2453,8 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         
         private string GetCellReference(int rowIndex, int columnIndex)
         {
-            if (rowIndex < 1) rowIndex = 1;
-            if (columnIndex < 1) columnIndex = 1;
+            rowIndex = Math.Clamp(rowIndex, 1, 1048576);
+            columnIndex = Math.Clamp(columnIndex, 1, 16384);
             var columnReference = string.Empty;
             int col = columnIndex;
             while (col > 0)

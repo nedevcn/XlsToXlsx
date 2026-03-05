@@ -2111,6 +2111,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             if (data == null || data.Length < 2)
                 return;
             ushort count = BitConverter.ToUInt16(data, 0);
+            int maxCount = Math.Min((data.Length - 2) / 8, 2048); // 防止损坏的 count 导致超大循环
+            if (count > maxCount) count = (ushort)maxCount;
             for (int i = 0; i < count; i++)
             {
                 int offset = 2 + i * 8;
