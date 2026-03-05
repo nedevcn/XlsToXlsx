@@ -2486,24 +2486,12 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private static int ColumnLettersToIndex(string letters)
         {
-            int index = 0;
-            foreach (char c in letters.ToUpperInvariant())
-                index = index * 26 + (c - 'A' + 1);
-            return index - 1;
+            return ExcelAddressHelper.LettersToColumnIndex0Based(letters);
         }
 
         private static string GetColumnLetterStatic(int columnIndex)
         {
-            if (columnIndex < 0) return "A";
-            string s = "";
-            int col = columnIndex + 1;
-            while (col > 0)
-            {
-                int mod = (col - 1) % 26;
-                s = (char)('A' + mod) + s;
-                col = (col - mod) / 26;
-            }
-            return s;
+            return ExcelAddressHelper.ColumnIndexToLetters0Based(columnIndex);
         }
 
         /// <summary>解析 BIFF8 DIMENSION (0x0200)：firstRow(4), lastRow(4), firstCol(2), lastCol(2), reserved(2)。行列均为 0-based，用于初始化或扩展 MaxRow/MaxColumn。</summary>

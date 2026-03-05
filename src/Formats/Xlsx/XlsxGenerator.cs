@@ -2930,14 +2930,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         {
             rowIndex = Math.Clamp(rowIndex, 1, 1048576);
             columnIndex = Math.Clamp(columnIndex, 1, 16384);
-            var columnReference = string.Empty;
-            int col = columnIndex;
-            while (col > 0)
-            {
-                col--;
-                columnReference = (char)('A' + col % 26) + columnReference;
-                col /= 26;
-            }
+            string columnReference = ExcelAddressHelper.ColumnIndexToLetters1Based(columnIndex);
             return columnReference + rowIndex;
         }
         
