@@ -14,16 +14,16 @@
 - **Comments/Notes**: Extracts basic cell notes/comments.
 - **Data Validation**: Retains basic data validation rules (dropdowns, number constraints).
 - **VBA Macros**: Preserves existing VBA macros by extracting the raw `vbaProject.bin` from the legacy file and embedding it into a macro-enabled `.xlsm` compatible structure.
-- **Page Setup**: Keeps print margins, page orientation, and paper size settings.
+- **Page Setup**: Keeps print margins, page orientation, paper size, and fit-to-page scaling.
+- **Pivot Tables**: Converts pivot table structure (fields, layout, data source range); output can be refreshed in Excel.
 
 ### ⚠️ Partially Supported (WIP)
-- **Formulas**: A custom formula decompiler supports over 170+ standard Excel functions. *Missing*: Shared formulas (`SHAREDFMLA`) and array formulas (`ARRAY`).
+- **Formulas**: A custom formula decompiler supports over 170+ standard Excel functions. Shared formulas (`SHAREDFMLA`) and array formulas (`ARRAY`) are supported.
 - **Charts**: Can detect and convert basic chart types (bar, line, pie, etc.), but advanced 3D properties and secondary axes are not yet fully mapped.
 - **Images & Drawings**: Basic image extraction is supported, but complex Microsoft Office Drawing (Escher) containers are partially parsed.
 - **Conditional Formatting**: Detection is supported, but styling rules (like Color Scales and Data Bars) currently use fallback styles instead of the exact embedded binary properties.
 
 ### ❌ Not Yet Supported
-- Pivot Tables
 - AutoFilter configurations
 - Worksheet and Workbook Password Protection
 - Summary Information / Document Properties

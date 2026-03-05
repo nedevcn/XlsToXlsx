@@ -244,6 +244,10 @@ namespace Nedev.XlsToXlsx
         /// 筛选值
         /// </summary>
         public List<object>? FilterValues { get; set; }
+        /// <summary>
+        /// 字段项（行/列/页字段的显示值，来自 SXVI）
+        /// </summary>
+        public List<string> Items { get; set; } = new List<string>();
     }
 
     /// <summary>

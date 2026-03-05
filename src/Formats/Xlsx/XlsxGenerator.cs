@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -175,7 +176,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         // 创建一个默认的工作表
                         var defaultWorksheet = new Worksheet { Name = "Sheet1" };
                         CreateWorksheetXml(archive, defaultWorksheet, 1, workbook);
-                        CreateWorksheetRelsXml(archive, defaultWorksheet, 1);
+                        CreateWorksheetRelsXml(archive, defaultWorksheet, 1, workbook);
                         if (defaultWorksheet.Comments.Count > 0)
                         {
                             CreateCommentsXml(archive, defaultWorksheet, 1);
@@ -191,7 +192,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             try
                             {
                                 CreateWorksheetXml(archive, workbook.Worksheets[i], i + 1, workbook);
-                                CreateWorksheetRelsXml(archive, workbook.Worksheets[i], i + 1);
+                                CreateWorksheetRelsXml(archive, workbook.Worksheets[i], i + 1, workbook);
                                 if (workbook.Worksheets[i].Comments.Count > 0)
                                 {
                                     CreateCommentsXml(archive, workbook.Worksheets[i], i + 1);
@@ -211,6 +212,8 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         Logger.Info("所有工作表创建完成");
                     }
                     
+                    // 数据透视表：pivotCache 与 pivotTable 部件
+                    CreatePivotParts(archive, workbook);
                     // 创建图片和嵌入对象
                     CreateDrawings(archive, workbook);
                     Logger.Info("创建图片和嵌入对象完成");
@@ -413,6 +416,19 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteAttributeString("ContentType", "application/vnd.ms-office.vbaProject");
                     writer.WriteEndElement();
                 }
+                // 数据透视表缓存与透视表部件
+                int totalPivot = GetTotalPivotTableCount(workbook);
+                for (int i = 0; i < totalPivot; i++)
+                {
+                    writer.WriteStartElement("Override");
+                    writer.WriteAttributeString("PartName", $"/xl/pivotCache/pivotCacheDefinition{i + 1}.xml");
+                    writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml");
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("Override");
+                    writer.WriteAttributeString("PartName", $"/xl/pivotTables/pivotTable{i + 1}.xml");
+                    writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml");
+                    writer.WriteEndElement();
+                }
                 
                 writer.WriteEndElement();
                 writer.WriteEndDocument();
@@ -539,6 +555,18 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             }
         }
 
+        private static int GetTotalPivotTableCount(Workbook workbook)
+        {
+            if (workbook?.Worksheets == null) return 0;
+            int n = 0;
+            foreach (var ws in workbook.Worksheets)
+            {
+                if (ws?.PivotTables != null)
+                    n += ws.PivotTables.Count;
+            }
+            return n;
+        }
+
         private void CreateWorkbookXml(ZipArchive archive, Workbook workbook)
         {
             var entry = archive.CreateEntry("xl/workbook.xml");
@@ -596,6 +624,22 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement(); // definedNames
                 }
 
+                // 数据透视表缓存引用（每个透视表一个 cache）
+                int totalPivotTables = GetTotalPivotTableCount(workbook);
+                if (totalPivotTables > 0)
+                {
+                    int relIdBase = workbook.Worksheets.Count + 3;
+                    writer.WriteStartElement("pivotCaches");
+                    for (int i = 0; i < totalPivotTables; i++)
+                    {
+                        writer.WriteStartElement("pivotCache");
+                        writer.WriteAttributeString("cacheId", (i + 1).ToString());
+                        writer.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId" + (relIdBase + i));
+                        writer.WriteEndElement();
+                    }
+                    writer.WriteEndElement(); // pivotCaches
+                }
+
                 writer.WriteEndElement(); // workbook
                 writer.WriteEndDocument();
             }
@@ -645,11 +689,22 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 writer.WriteAttributeString("Target", "sharedStrings.xml");
                 writer.WriteEndElement();
                 
-                // VBA项目关系
+                int totalPivotTables = GetTotalPivotTableCount(workbook);
+                int pivotRelIdBase = worksheetCount + 3;
+                for (int i = 0; i < totalPivotTables; i++)
+                {
+                    writer.WriteStartElement("Relationship");
+                    writer.WriteAttributeString("Id", "rId" + (pivotRelIdBase + i));
+                    writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition");
+                    writer.WriteAttributeString("Target", "pivotCache/pivotCacheDefinition" + (i + 1) + ".xml");
+                    writer.WriteEndElement();
+                }
+                
+                // VBA项目关系（ID 在 pivot 之后）
                 if (workbook.VbaProject != null)
                 {
                     writer.WriteStartElement("Relationship");
-                    writer.WriteAttributeString("Id", "rId" + (worksheetCount + 3));
+                    writer.WriteAttributeString("Id", "rId" + (pivotRelIdBase + totalPivotTables));
                     writer.WriteAttributeString("Type", "http://schemas.microsoft.com/office/2006/relationships/vbaProject");
                     writer.WriteAttributeString("Target", "vbaProject.bin");
                     writer.WriteEndElement();
@@ -1156,18 +1211,15 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             }
         }
         
-        private void CreateWorksheetRelsXml(ZipArchive archive, Worksheet worksheet, int sheetIndex)
+        private void CreateWorksheetRelsXml(ZipArchive archive, Worksheet worksheet, int sheetIndex, Workbook workbook)
         {
-            // 只有在有注释、图表、图片或超链接时才创建关系文件
             bool hasComments = worksheet.Comments != null && worksheet.Comments.Count > 0;
             bool hasDrawings = SheetHasDrawings(worksheet);
             bool hasHyperlinks = worksheet.Hyperlinks != null && worksheet.Hyperlinks.Count > 0;
-            
-            if (!hasComments && !hasDrawings && !hasHyperlinks)
-            {
+            bool hasPivotTables = worksheet.PivotTables != null && worksheet.PivotTables.Count > 0;
+            if (!hasComments && !hasDrawings && !hasHyperlinks && !hasPivotTables)
                 return;
-            }
-            
+
             var entry = archive.CreateEntry($"xl/worksheets/_rels/sheet{sheetIndex}.xml.rels");
             using (var stream = entry.Open())
             using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
@@ -1210,7 +1262,208 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         writer.WriteEndElement();
                     }
                 }
+                // 数据透视表关系
+                if (hasPivotTables && workbook != null)
+                {
+                    int globalPivotIndex = 0;
+                    for (int s = 0; s < sheetIndex - 1 && s < workbook.Worksheets.Count; s++)
+                        globalPivotIndex += workbook.Worksheets[s].PivotTables?.Count ?? 0;
+                    for (int i = 0; i < worksheet.PivotTables!.Count; i++)
+                    {
+                        writer.WriteStartElement("Relationship");
+                        writer.WriteAttributeString("Id", "rIdPivot" + (i + 1));
+                        writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable");
+                        writer.WriteAttributeString("Target", "../pivotTables/pivotTable" + (globalPivotIndex + i + 1) + ".xml");
+                        writer.WriteEndElement();
+                    }
+                }
                 
+                writer.WriteEndElement();
+                writer.WriteEndDocument();
+            }
+        }
+
+        private void CreatePivotParts(ZipArchive archive, Workbook workbook)
+        {
+            int total = GetTotalPivotTableCount(workbook);
+            if (total == 0) return;
+            int idx = 0;
+            for (int s = 0; s < workbook.Worksheets.Count; s++)
+            {
+                var ws = workbook.Worksheets[s];
+                if (ws.PivotTables == null) continue;
+                foreach (var pt in ws.PivotTables)
+                {
+                    if (pt == null) continue;
+                    idx++;
+                    CreatePivotCacheDefinitionXml(archive, idx, pt, ws.Name ?? "Sheet" + (s + 1));
+                    CreatePivotTableXml(archive, idx, pt);
+                    CreatePivotTableRelsXml(archive, idx);
+                }
+            }
+        }
+
+        private static readonly string MainNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        private static readonly string RelNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+        private void CreatePivotCacheDefinitionXml(ZipArchive archive, int cacheIndex, PivotTable pivotTable, string sheetName)
+        {
+            var entry = archive.CreateEntry($"xl/pivotCache/pivotCacheDefinition{cacheIndex}.xml");
+            using (var stream = entry.Open())
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("pivotCacheDefinition", MainNs);
+                writer.WriteAttributeString("xmlns", "r", null, RelNs);
+                writer.WriteAttributeString("r", "id", RelNs, "rId1");
+                writer.WriteAttributeString("refreshedVersion", "3");
+                writer.WriteAttributeString("createdVersion", "3");
+                writer.WriteAttributeString("recordCount", "0");
+                writer.WriteStartElement("cacheSource");
+                writer.WriteAttributeString("type", "worksheet");
+                writer.WriteStartElement("worksheetSource");
+                writer.WriteAttributeString("ref", pivotTable.DataSource ?? "A1:Z100");
+                writer.WriteAttributeString("sheet", sheetName);
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                var allFields = (pivotTable.RowFields ?? new List<PivotField>())
+                    .Concat(pivotTable.ColumnFields ?? new List<PivotField>())
+                    .Concat(pivotTable.PageFields ?? new List<PivotField>())
+                    .Concat(pivotTable.DataFields ?? new List<PivotField>())
+                    .ToList();
+                writer.WriteStartElement("cacheFields");
+                writer.WriteAttributeString("count", allFields.Count.ToString());
+                foreach (var f in allFields)
+                {
+                    writer.WriteStartElement("cacheField");
+                    writer.WriteAttributeString("name", CleanXmlString(f?.Name ?? "Field"));
+                    writer.WriteStartElement("sharedItems");
+                    var items = f?.Items;
+                    bool hasStr = items != null && items.Any(s => !string.IsNullOrEmpty(s));
+                    writer.WriteAttributeString("containsString", hasStr ? "1" : "0");
+                    writer.WriteAttributeString("containsNumber", "0");
+                    if (hasStr && items != null && items.Count > 0)
+                    {
+                        writer.WriteAttributeString("count", items.Count.ToString());
+                        foreach (var it in items)
+                            writer.WriteElementString("s", CleanXmlString(it ?? ""));
+                    }
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                }
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                writer.WriteEndDocument();
+            }
+        }
+
+        private void CreatePivotTableXml(ZipArchive archive, int pivotIndex, PivotTable pivotTable)
+        {
+            var entry = archive.CreateEntry($"xl/pivotTables/pivotTable{pivotIndex}.xml");
+            using (var stream = entry.Open())
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("pivotTableDefinition", MainNs);
+                writer.WriteAttributeString("xmlns", "r", null, RelNs);
+                writer.WriteAttributeString("name", CleanXmlString(pivotTable.Name ?? "PivotTable" + pivotIndex));
+                writer.WriteAttributeString("cacheId", pivotIndex.ToString());
+                writer.WriteAttributeString("applyNumberFormats", "0");
+                writer.WriteAttributeString("applyBorderFormats", "0");
+                writer.WriteAttributeString("applyFontFormats", "0");
+                writer.WriteAttributeString("applyPatternFormats", "0");
+                writer.WriteAttributeString("applyAlignmentFormats", "0");
+                writer.WriteAttributeString("applyWidthHeightFormats", "1");
+                writer.WriteAttributeString("dataCaption", "Values");
+                writer.WriteAttributeString("updatedVersion", "3");
+                writer.WriteAttributeString("minRefreshableVersion", "3");
+                writer.WriteAttributeString("useAutoFormatting", "1");
+                writer.WriteAttributeString("itemPrintTitles", "1");
+                writer.WriteAttributeString("createdVersion", "3");
+                writer.WriteAttributeString("indent", "0");
+                writer.WriteAttributeString("outline", "1");
+                writer.WriteAttributeString("outlineData", "1");
+                string locationRef = pivotTable.Range ?? pivotTable.DataSource ?? "A1:Z100";
+                writer.WriteStartElement("location");
+                writer.WriteAttributeString("ref", locationRef);
+                writer.WriteAttributeString("firstHeaderRow", "1");
+                writer.WriteAttributeString("firstDataRow", "1");
+                writer.WriteAttributeString("firstDataCol", "0");
+                writer.WriteEndElement();
+                var allFields = (pivotTable.RowFields ?? new List<PivotField>())
+                    .Concat(pivotTable.ColumnFields ?? new List<PivotField>())
+                    .Concat(pivotTable.PageFields ?? new List<PivotField>())
+                    .Concat(pivotTable.DataFields ?? new List<PivotField>())
+                    .ToList();
+                writer.WriteStartElement("pivotFields");
+                writer.WriteAttributeString("count", allFields.Count.ToString());
+                foreach (var f in allFields)
+                {
+                    bool isData = f?.Type == "data";
+                    writer.WriteStartElement("pivotField");
+                    if (isData)
+                        writer.WriteAttributeString("dataField", "1");
+                    writer.WriteAttributeString("showAll", "0");
+                    writer.WriteAttributeString("sortType", (f?.SortType ?? "manual").ToLowerInvariant());
+                    writer.WriteEndElement();
+                }
+                writer.WriteEndElement();
+                writer.WriteStartElement("rowItems");
+                writer.WriteAttributeString("count", "1");
+                writer.WriteStartElement("i");
+                writer.WriteAttributeString("t", "data");
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                writer.WriteStartElement("colItems");
+                writer.WriteAttributeString("count", "1");
+                writer.WriteStartElement("i");
+                writer.WriteAttributeString("t", "data");
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                int rowColPageCount = (pivotTable.RowFields?.Count ?? 0) + (pivotTable.ColumnFields?.Count ?? 0) + (pivotTable.PageFields?.Count ?? 0);
+                int dataCount = pivotTable.DataFields?.Count ?? 0;
+                writer.WriteStartElement("dataFields");
+                writer.WriteAttributeString("count", dataCount.ToString());
+                for (int i = 0; i < dataCount; i++)
+                {
+                    var df = pivotTable.DataFields![i];
+                    string name = string.IsNullOrEmpty(df.Name) ? "Sum of " + (df.SourceName ?? "Value") : df.Name;
+                    string subtotal = (df.Function ?? "sum").ToLowerInvariant();
+                    writer.WriteStartElement("dataField");
+                    writer.WriteAttributeString("name", CleanXmlString(name));
+                    writer.WriteAttributeString("fld", (rowColPageCount + i).ToString());
+                    writer.WriteAttributeString("subtotal", subtotal);
+                    writer.WriteAttributeString("baseField", "0");
+                    writer.WriteAttributeString("baseItem", "0");
+                    writer.WriteAttributeString("numFmtId", "0");
+                    writer.WriteEndElement();
+                }
+                writer.WriteEndElement();
+                writer.WriteStartElement("tableStyle");
+                writer.WriteAttributeString("name", "TableStyleLight16");
+                writer.WriteAttributeString("showRowHeaders", "1");
+                writer.WriteAttributeString("showColHeaders", "1");
+                writer.WriteAttributeString("showRowStripes", "0");
+                writer.WriteAttributeString("showColStripes", "0");
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                writer.WriteEndDocument();
+            }
+        }
+
+        private void CreatePivotTableRelsXml(ZipArchive archive, int pivotIndex)
+        {
+            var entry = archive.CreateEntry($"xl/pivotTables/_rels/pivotTable{pivotIndex}.xml.rels");
+            using (var stream = entry.Open())
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
+                writer.WriteStartElement("Relationship");
+                writer.WriteAttributeString("Id", "rId1");
+                writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition");
+                writer.WriteAttributeString("Target", "../pivotCache/pivotCacheDefinition" + pivotIndex + ".xml");
+                writer.WriteEndElement();
                 writer.WriteEndElement();
                 writer.WriteEndDocument();
             }

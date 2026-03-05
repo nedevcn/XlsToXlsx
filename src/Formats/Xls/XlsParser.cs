@@ -71,6 +71,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         // 数据透视表解析状态
         private PivotTable? _currentPivotTable;
+        private PivotField? _currentPivotField;
 
         // 共享公式：SHAREDFMLA 后的主公式及范围，用于后续 FORMULA 单元格按行列差调整引用
         private string? _sharedFormulaString;
@@ -2629,7 +2630,19 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     if (record.Data.Length >= 16)
                     {
                         var pivotTable = new PivotTable();
-                        int offset = 16; 
+                        // 部分 BIFF 实现中前 16 字节含范围：offset 4-5 rwFirst, 6-7 rwLast, 8-9 colFirst, 10-11 colLast (0-based)
+                        if (record.Data.Length >= 12)
+                        {
+                            ushort rwFirst = BitConverter.ToUInt16(record.Data, 4);
+                            ushort rwLast = BitConverter.ToUInt16(record.Data, 6);
+                            ushort colFirst = BitConverter.ToUInt16(record.Data, 8);
+                            ushort colLast = BitConverter.ToUInt16(record.Data, 10);
+                            if (rwLast >= rwFirst && colLast >= colFirst && rwLast < 65535 && colLast < 256)
+                            {
+                                pivotTable.DataSource = $"{GetColumnLetterStatic(colFirst + 1)}{rwFirst + 1}:{GetColumnLetterStatic(colLast + 1)}{rwLast + 1}";
+                            }
+                        }
+                        int offset = 16;
                         // SXVIEW 中的表名由一个两字节的字符数开始 (BIFF8)
                         if (offset + 2 <= record.Data.Length)
                         {
@@ -2637,7 +2650,6 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             offset += 2;
                             pivotTable.Name = ReadBiffStringFromBytes(record.Data, ref offset, nameLen);
                         }
-                        
                         _currentPivotTable = pivotTable;
                         worksheet.PivotTables.Add(pivotTable);
                         Logger.Info($"开始解析数据透视表: {pivotTable.Name}");
@@ -2661,6 +2673,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         else if (field.Type == "column") _currentPivotTable.ColumnFields.Add(field);
                         else if (field.Type == "page") _currentPivotTable.PageFields.Add(field);
                         else if (field.Type == "data") _currentPivotTable.DataFields.Add(field);
+                        _currentPivotField = field;
                     }
                     break;
 
@@ -2675,6 +2688,24 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             // 0=Sum, 1=Count, 2=Average, etc.
                             string[] funcs = { "sum", "count", "average", "max", "min", "product", "countNums", "stdDev", "stdDevp", "var", "varp" };
                             if (iSubtotal < funcs.Length) lastDataField.Function = funcs[iSubtotal];
+                        }
+                    }
+                    break;
+
+                case (ushort)BiffRecordType.SXVI:
+                    // SXVI (0x00B2) - 数据透视表项（在透视表流中，与全局 BORDER 同 ID 按流区分）
+                    if (_currentPivotField != null && record.Data != null && record.Data.Length >= 2)
+                    {
+                        ushort cItem = BitConverter.ToUInt16(record.Data, 0);
+                        int off = 2;
+                        for (int i = 0; i < cItem && off + 2 <= record.Data.Length; i++)
+                        {
+                            ushort cch = BitConverter.ToUInt16(record.Data, off);
+                            off += 2;
+                            if (cch == 0) continue;
+                            if (off + cch > record.Data.Length) break;
+                            string itemStr = ReadBiffStringFromBytes(record.Data, ref off, cch);
+                            _currentPivotField.Items.Add(itemStr);
                         }
                     }
                     break;
@@ -2705,6 +2736,24 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                                     break;
                                 }
                             }
+                        }
+                    }
+                    break;
+
+                case (ushort)BiffRecordType.SXPI:
+                    // SXPI (0x00B7) - 页字段项
+                    if (_currentPivotField != null && _currentPivotField.Type == "page" && record.Data != null && record.Data.Length >= 2)
+                    {
+                        ushort cItem = BitConverter.ToUInt16(record.Data, 0);
+                        int off = 2;
+                        for (int i = 0; i < cItem && off + 2 <= record.Data.Length; i++)
+                        {
+                            ushort cch = BitConverter.ToUInt16(record.Data, off);
+                            off += 2;
+                            if (cch == 0) continue;
+                            if (off + cch > record.Data.Length) break;
+                            string itemStr = ReadBiffStringFromBytes(record.Data, ref off, cch);
+                            _currentPivotField.Items.Add(itemStr);
                         }
                     }
                     break;
