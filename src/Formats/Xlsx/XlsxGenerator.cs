@@ -757,7 +757,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         writer.WriteStartElement("col");
                         writer.WriteAttributeString("min", (colInfo.FirstColumn + 1).ToString()); // 1-based
                         writer.WriteAttributeString("max", (colInfo.LastColumn + 1).ToString());
-                        // 将 1/256 字符宽u5355位转为 XLSX 的字符宽度（除以 256）
+                        // 将 1/256 字符宽度转为 XLSX 的字符宽度（除以 256）
                         double widthInChars = colInfo.Width / 256.0;
                         writer.WriteAttributeString("width", widthInChars.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
                         if (colInfo.Hidden)

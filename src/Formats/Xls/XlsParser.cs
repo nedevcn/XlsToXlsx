@@ -924,23 +924,20 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         
         private void ParsePaletteRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析调色板记录
-            if (record.Data != null && record.Data.Length >= 10)
+            // BIFF8 PALETTE: 2 字节起始索引 + 每色 4 字节 (R,G,B,保留)
+            if (record.Data == null || record.Data.Length < 6)
+                return;
+            int startIndex = BitConverter.ToUInt16(record.Data, 0);
+            int colorCount = (record.Data.Length - 2) / 4;
+            for (int i = 0; i < colorCount; i++)
             {
-                int startIndex = BitConverter.ToUInt16(record.Data, 0);
-                int colorCount = (record.Data.Length - 2) / 10;
-                
-                for (int i = 0; i < colorCount; i++)
+                int offset = 2 + i * 4;
+                if (offset + 3 <= record.Data.Length)
                 {
-                    int offset = 2 + i * 10;
-                    if (offset + 10 <= record.Data.Length)
-                    {
-                        byte red = record.Data[offset + 2];
-                        byte green = record.Data[offset + 4];
-                        byte blue = record.Data[offset + 6];
-                        string color = $"#{red:X2}{green:X2}{blue:X2}";
-                        worksheet.Palette[startIndex + i] = color;
-                    }
+                    byte red = record.Data[offset];
+                    byte green = record.Data[offset + 1];
+                    byte blue = record.Data[offset + 2];
+                    worksheet.Palette[startIndex + i] = $"#{red:X2}{green:X2}{blue:X2}";
                 }
             }
         }
@@ -1048,48 +1045,43 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         }
         private void ParsePictureRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析图片记录
-            if (record.Data != null)
+            // 解析图片记录（可能被 CONTINUE 分片，必须用完整数据）
+            byte[] fullData = record.GetAllData();
+            if (fullData == null || fullData.Length == 0)
+                return;
+            try
             {
-                try
+                var picture = new Picture();
+                picture.Data = new byte[fullData.Length];
+                Array.Copy(fullData, picture.Data, fullData.Length);
+
+                // 识别图片格式
+                if (fullData.Length >= 4)
                 {
-                    var picture = new Picture();
-                    // 读取图片数据
-                    picture.Data = new byte[record.Data.Length];
-                    Array.Copy(record.Data, picture.Data, record.Data.Length);
-                    
-                    // 识别图片格式
-                    if (record.Data.Length >= 4)
-                    {
-                        // 检查图片格式
-                        if (record.Data[0] == 0x89 && record.Data[1] == 0x50 && record.Data[2] == 0x4E && record.Data[3] == 0x47)
+                    if (fullData[0] == 0x89 && fullData[1] == 0x50 && fullData[2] == 0x4E && fullData[3] == 0x47)
                         {
                             // PNG格式
                             picture.MimeType = "image/png";
                             picture.Extension = "png";
                         }
-                        else if (record.Data[0] == 0xFF && record.Data[1] == 0xD8)
+                        else if (fullData[0] == 0xFF && fullData[1] == 0xD8)
                         {
-                            // JPEG格式
                             picture.MimeType = "image/jpeg";
                             picture.Extension = "jpg";
                         }
-                        else if (record.Data[0] == 0x47 && record.Data[1] == 0x49 && record.Data[2] == 0x46)
+                        else if (fullData[0] == 0x47 && fullData[1] == 0x49 && fullData[2] == 0x46)
                         {
-                            // GIF格式
                             picture.MimeType = "image/gif";
                             picture.Extension = "gif";
                         }
-                        else if (record.Data[0] == 0x42 && record.Data[1] == 0x4D)
+                        else if (fullData[0] == 0x42 && fullData[1] == 0x4D)
                         {
-                            // BMP格式
                             picture.MimeType = "image/bmp";
                             picture.Extension = "bmp";
                         }
-                        else if (record.Data[0] == 0x52 && record.Data[1] == 0x49 && record.Data[2] == 0x46 && record.Data[3] == 0x46)
+                        else if (fullData[0] == 0x52 && fullData[1] == 0x49 && fullData[2] == 0x46 && fullData[3] == 0x46)
                         {
-                            // WebP格式
-                            if (record.Data.Length >= 12 && record.Data[8] == 0x57 && record.Data[9] == 0x45 && record.Data[10] == 0x42 && record.Data[11] == 0x50)
+                            if (fullData.Length >= 12 && fullData[8] == 0x57 && fullData[9] == 0x45 && fullData[10] == 0x42 && fullData[11] == 0x50)
                             {
                                 picture.MimeType = "image/webp";
                                 picture.Extension = "webp";
@@ -1101,79 +1093,67 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                                 picture.Extension = "bmp";
                             }
                         }
-                        else if (record.Data[0] == 0x49 && record.Data[1] == 0x49 && record.Data[2] == 0x2A && record.Data[3] == 0x00)
+                        else if (fullData[0] == 0x49 && fullData[1] == 0x49 && fullData[2] == 0x2A && fullData[3] == 0x00)
                         {
-                            // TIFF格式 (小端序)
                             picture.MimeType = "image/tiff";
                             picture.Extension = "tiff";
                         }
-                        else if (record.Data[0] == 0x4D && record.Data[1] == 0x4D && record.Data[2] == 0x00 && record.Data[3] == 0x2A)
+                        else if (fullData[0] == 0x4D && fullData[1] == 0x4D && fullData[2] == 0x00 && fullData[3] == 0x2A)
                         {
-                            // TIFF格式 (大端序)
                             picture.MimeType = "image/tiff";
                             picture.Extension = "tiff";
                         }
-                        else if (record.Data[0] == 0x38 && record.Data[1] == 0x42 && record.Data[2] == 0x50 && record.Data[3] == 0x53)
+                        else if (fullData[0] == 0x38 && fullData[1] == 0x42 && fullData[2] == 0x50 && fullData[3] == 0x53)
                         {
-                            // PSD格式
                             picture.MimeType = "image/vnd.adobe.photoshop";
                             picture.Extension = "psd";
                         }
-                        else if (record.Data[0] == 0x52 && record.Data[1] == 0x49 && record.Data[2] == 0x46 && record.Data[3] == 0x46 && record.Data.Length >= 10)
+                        else if (fullData[0] == 0x52 && fullData[1] == 0x49 && fullData[2] == 0x46 && fullData[3] == 0x46 && fullData.Length >= 10)
                         {
-                            // RTF格式
                             picture.MimeType = "image/rtf";
                             picture.Extension = "rtf";
                         }
-                        else if (record.Data[0] == 0x49 && record.Data[1] == 0x4D && record.Data[2] == 0x47)
+                        else if (fullData[0] == 0x49 && fullData[1] == 0x4D && fullData[2] == 0x47)
                         {
-                            // IMG格式
                             picture.MimeType = "image/x-ms-bmp";
                             picture.Extension = "img";
                         }
-                        else if (record.Data[0] == 0x43 && record.Data[1] == 0x57 && record.Data[2] == 0x53)
+                        else if (fullData[0] == 0x43 && fullData[1] == 0x57 && fullData[2] == 0x53)
                         {
-                            // CWS格式 (Compressed Web Archive)
                             picture.MimeType = "application/x-cws";
                             picture.Extension = "cws";
                         }
                         else
                         {
-                            // 默认为BMP格式
                             picture.MimeType = "image/bmp";
                             picture.Extension = "bmp";
                         }
-                    }
-                    else
-                    {
-                        // 默认为BMP格式
-                        picture.MimeType = "image/bmp";
-                        picture.Extension = "bmp";
-                    }
-                    
-                    worksheet.Pictures.Add(picture);
                 }
-                catch (Exception ex)
+                else
                 {
-                    throw new ImageProcessingException($"处理图片时发生错误: {ex.Message}", ex);
+                    picture.MimeType = "image/bmp";
+                    picture.Extension = "bmp";
                 }
+                worksheet.Pictures.Add(picture);
+            }
+            catch (Exception ex)
+            {
+                throw new ImageProcessingException($"处理图片时发生错误: {ex.Message}", ex);
             }
         }
 
         
         private void ParseDVRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析数据验证记录
-            if (record.Data != null && record.Data.Length >= 16)
-            {
-                var dataValidation = new DataValidation();
-                
-                // 解析选项标志
-                ushort options = BitConverter.ToUInt16(record.Data, 0);
-                dataValidation.AllowBlank = (options & 0x01) != 0;
-                
-                // 解析条件类型
-                ushort validationType = BitConverter.ToUInt16(record.Data, 2);
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 16)
+                return;
+            var dataValidation = new DataValidation();
+
+            ushort options = BitConverter.ToUInt16(data, 0);
+            dataValidation.AllowBlank = (options & 0x01) != 0;
+
+            ushort validationType = BitConverter.ToUInt16(data, 2);
                 switch (validationType)
                 {
                     case 0: dataValidation.Type = "none"; break;
@@ -1186,74 +1166,60 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     case 7: dataValidation.Type = "custom"; break;
                 }
                 
-                // 解析操作符
-                ushort operatorType = BitConverter.ToUInt16(record.Data, 4);
-                switch (operatorType)
-                {
-                    case 0: dataValidation.Operator = "between"; break;
-                    case 1: dataValidation.Operator = "notBetween"; break;
-                    case 2: dataValidation.Operator = "equal"; break;
-                    case 3: dataValidation.Operator = "notEqual"; break;
-                    case 4: dataValidation.Operator = "greaterThan"; break;
-                    case 5: dataValidation.Operator = "lessThan"; break;
-                    case 6: dataValidation.Operator = "greaterThanOrEqual"; break;
-                    case 7: dataValidation.Operator = "lessThanOrEqual"; break;
-                }
-                
-                // 解析公式偏移量 (不再是简单的字符串偏移，而是用于二进制 Ptg 读取)
-        int currentOffset = 6;
-        ushort formula1Size = BitConverter.ToUInt16(record.Data, currentOffset); currentOffset += 2;
-        ushort formula2Size = BitConverter.ToUInt16(record.Data, currentOffset); currentOffset += 2;
-        
-        // 解析公式1
-        if (formula1Size > 0 && currentOffset + formula1Size <= record.Data.Length)
-        {
-            byte[] formula1Bytes = new byte[formula1Size];
-            Array.Copy(record.Data, currentOffset, formula1Bytes, 0, formula1Size);
-            dataValidation.Formula1 = FormulaDecompiler.Decompile(formula1Bytes);
-            currentOffset += formula1Size;
-        }
-        
-        // 解析公式2
-        if (formula2Size > 0 && currentOffset + formula2Size <= record.Data.Length)
-        {
-            byte[] formula2Bytes = new byte[formula2Size];
-            Array.Copy(record.Data, currentOffset, formula2Bytes, 0, formula2Size);
-            dataValidation.Formula2 = FormulaDecompiler.Decompile(formula2Bytes);
-            currentOffset += formula2Size;
-        }
-        
-        // 解析范围
-        if (currentOffset + 8 <= record.Data.Length)
-        {
-            // 解析范围的起始和结束单元格
-            ushort firstRow = BitConverter.ToUInt16(record.Data, currentOffset); currentOffset += 2;
-            ushort lastRow = BitConverter.ToUInt16(record.Data, currentOffset); currentOffset += 2;
-            ushort firstCol = BitConverter.ToUInt16(record.Data, currentOffset); currentOffset += 2;
-            ushort lastCol = BitConverter.ToUInt16(record.Data, currentOffset); currentOffset += 2;
-                    
-                    // 生成范围字符串
-                    dataValidation.Range = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
-                }
-                else
-                {
-                    // 如果没有范围信息，使用默认值
-                    dataValidation.Range = "A1:A10";
-                }
-                
-                worksheet.DataValidations.Add(dataValidation);
+            ushort operatorType = BitConverter.ToUInt16(data, 4);
+            switch (operatorType)
+            {
+                case 0: dataValidation.Operator = "between"; break;
+                case 1: dataValidation.Operator = "notBetween"; break;
+                case 2: dataValidation.Operator = "equal"; break;
+                case 3: dataValidation.Operator = "notEqual"; break;
+                case 4: dataValidation.Operator = "greaterThan"; break;
+                case 5: dataValidation.Operator = "lessThan"; break;
+                case 6: dataValidation.Operator = "greaterThanOrEqual"; break;
+                case 7: dataValidation.Operator = "lessThanOrEqual"; break;
             }
+
+            int currentOffset = 6;
+            ushort formula1Size = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
+            ushort formula2Size = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
+
+            if (formula1Size > 0 && currentOffset + formula1Size <= data.Length)
+            {
+                byte[] formula1Bytes = new byte[formula1Size];
+                Array.Copy(data, currentOffset, formula1Bytes, 0, formula1Size);
+                dataValidation.Formula1 = FormulaDecompiler.Decompile(formula1Bytes);
+                currentOffset += formula1Size;
+            }
+            if (formula2Size > 0 && currentOffset + formula2Size <= data.Length)
+            {
+                byte[] formula2Bytes = new byte[formula2Size];
+                Array.Copy(data, currentOffset, formula2Bytes, 0, formula2Size);
+                dataValidation.Formula2 = FormulaDecompiler.Decompile(formula2Bytes);
+                currentOffset += formula2Size;
+            }
+            if (currentOffset + 8 <= data.Length)
+            {
+                ushort firstRow = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
+                ushort lastRow = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
+                ushort firstCol = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
+                ushort lastCol = BitConverter.ToUInt16(data, currentOffset);
+                dataValidation.Range = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
+            }
+            else
+            {
+                dataValidation.Range = "A1:A10";
+            }
+            worksheet.DataValidations.Add(dataValidation);
         }
         
         private void ParseCFRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析条件格式记录
-            if (record.Data != null && record.Data.Length >= 8)
-            {
-                var conditionalFormat = new ConditionalFormat();
-                
-                // 解析条件类型
-                ushort conditionType = BitConverter.ToUInt16(record.Data, 0);
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 8)
+                return;
+            var conditionalFormat = new ConditionalFormat();
+
+            ushort conditionType = BitConverter.ToUInt16(data, 0);
                 switch (conditionType)
                 {
                     case 0: conditionalFormat.Type = "cellIs"; break;
@@ -1262,145 +1228,103 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     case 3: conditionalFormat.Type = "dataBar"; break;
                     case 4: conditionalFormat.Type = "iconSet"; break;
                 }
-                
-                // 解析操作符
-                ushort operatorType = BitConverter.ToUInt16(record.Data, 2);
-                switch (operatorType)
-                {
-                    case 0: conditionalFormat.Operator = "between"; break;
-                    case 1: conditionalFormat.Operator = "notBetween"; break;
-                    case 2: conditionalFormat.Operator = "equal"; break;
-                    case 3: conditionalFormat.Operator = "notEqual"; break;
-                    case 4: conditionalFormat.Operator = "greaterThan"; break;
-                    case 5: conditionalFormat.Operator = "lessThan"; break;
-                    case 6: conditionalFormat.Operator = "greaterThanOrEqual"; break;
-                    case 7: conditionalFormat.Operator = "lessThanOrEqual"; break;
-                    case 8: conditionalFormat.Operator = "containsText"; break;
-                    case 9: conditionalFormat.Operator = "notContainsText"; break;
-                    case 10: conditionalFormat.Operator = "beginsWith"; break;
-                    case 11: conditionalFormat.Operator = "endsWith"; break;
-                }
-                
-                // 解析公式
-                if (record.Data.Length >= 12)
-                {
-                    int currentOffset = 4;
-                    ushort formula1Size = BitConverter.ToUInt16(record.Data, currentOffset); 
-                    currentOffset += 2;
-                    ushort formula2Size = BitConverter.ToUInt16(record.Data, currentOffset);
-                    currentOffset += 2;
-                    
-                    // Skip optional parts we don't handle yet block
-                    // Formula strings start further down (in BIFF8: size1, size2, 4 bytes padding usually, then formulas)
-                    if (currentOffset + 4 <= record.Data.Length)
-                    {
-                        currentOffset += 4;
-                        
-                        if (formula1Size > 0 && currentOffset + formula1Size <= record.Data.Length)
-                        {
-                            byte[] ptg1 = new byte[formula1Size];
-                            Array.Copy(record.Data, currentOffset, ptg1, 0, formula1Size);
-                            conditionalFormat.Formula = FormulaDecompiler.Decompile(ptg1);
-                            currentOffset += formula1Size;
-                        }
 
-                        if (formula2Size > 0 && currentOffset + formula2Size <= record.Data.Length)
-                        {
-                            byte[] ptg2 = new byte[formula2Size];
-                            Array.Copy(record.Data, currentOffset, ptg2, 0, formula2Size);
-                            // Not stored in POCO model: conditionalFormat.Formula2 = FormulaDecompiler.Decompile(ptg2);
-                        }
+            ushort operatorType = BitConverter.ToUInt16(data, 2);
+            switch (operatorType)
+            {
+                case 0: conditionalFormat.Operator = "between"; break;
+                case 1: conditionalFormat.Operator = "notBetween"; break;
+                case 2: conditionalFormat.Operator = "equal"; break;
+                case 3: conditionalFormat.Operator = "notEqual"; break;
+                case 4: conditionalFormat.Operator = "greaterThan"; break;
+                case 5: conditionalFormat.Operator = "lessThan"; break;
+                case 6: conditionalFormat.Operator = "greaterThanOrEqual"; break;
+                case 7: conditionalFormat.Operator = "lessThanOrEqual"; break;
+                case 8: conditionalFormat.Operator = "containsText"; break;
+                case 9: conditionalFormat.Operator = "notContainsText"; break;
+                case 10: conditionalFormat.Operator = "beginsWith"; break;
+                case 11: conditionalFormat.Operator = "endsWith"; break;
+            }
+            if (data.Length >= 12)
+            {
+                int currentOffset = 4;
+                ushort formula1Size = BitConverter.ToUInt16(data, currentOffset);
+                currentOffset += 2;
+                ushort formula2Size = BitConverter.ToUInt16(data, currentOffset);
+                currentOffset += 2;
+                if (currentOffset + 4 <= data.Length)
+                {
+                    currentOffset += 4;
+                    if (formula1Size > 0 && currentOffset + formula1Size <= data.Length)
+                    {
+                        byte[] ptg1 = new byte[formula1Size];
+                        Array.Copy(data, currentOffset, ptg1, 0, formula1Size);
+                        conditionalFormat.Formula = FormulaDecompiler.Decompile(ptg1);
+                        currentOffset += formula1Size;
+                    }
+                    if (formula2Size > 0 && currentOffset + formula2Size <= data.Length)
+                    {
+                        byte[] ptg2 = new byte[formula2Size];
+                        Array.Copy(data, currentOffset, ptg2, 0, formula2Size);
                     }
                 }
-                
-                // 解析范围（从CFHeader记录中获取）
-                conditionalFormat.Range = !string.IsNullOrEmpty(_currentCFRange) ? _currentCFRange : "A1:A10";
-                
-                worksheet.ConditionalFormats.Add(conditionalFormat);
             }
+            conditionalFormat.Range = !string.IsNullOrEmpty(_currentCFRange) ? _currentCFRange : "A1:A10";
+            worksheet.ConditionalFormats.Add(conditionalFormat);
         }
         
         private void ParseCFHeaderRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析条件格式头部记录
-            if (record.Data != null && record.Data.Length >= 12)
-            {
-                // 解析条件格式数量
-                ushort conditionCount = BitConverter.ToUInt16(record.Data, 0);
-                
-                // 解析范围
-                ushort firstRow = BitConverter.ToUInt16(record.Data, 2);
-                ushort lastRow = BitConverter.ToUInt16(record.Data, 4);
-                ushort firstCol = BitConverter.ToUInt16(record.Data, 6);
-                ushort lastCol = BitConverter.ToUInt16(record.Data, 8);
-                
-                // 生成范围字符串
-                _currentCFRange = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
-                
-                // 存储范围信息，供后续的CF记录使用
-            }
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 12)
+                return;
+            ushort conditionCount = BitConverter.ToUInt16(data, 0);
+            ushort firstRow = BitConverter.ToUInt16(data, 2);
+            ushort lastRow = BitConverter.ToUInt16(data, 4);
+            ushort firstCol = BitConverter.ToUInt16(data, 6);
+            ushort lastCol = BitConverter.ToUInt16(data, 8);
+            _currentCFRange = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
         }
 
         private void ParseHyperlinkRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析超链接记录
-            if (record.Data != null && record.Data.Length >= 20)
-            {
-                var hyperlink = new Hyperlink();
-                
-                // 解析超链接范围
-                ushort firstRow = BitConverter.ToUInt16(record.Data, 0);
-                ushort lastRow = BitConverter.ToUInt16(record.Data, 2);
-                ushort firstCol = BitConverter.ToUInt16(record.Data, 4);
-                ushort lastCol = BitConverter.ToUInt16(record.Data, 6);
-                hyperlink.Range = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
-                
-                // 解析目标URL
-                int urlLength = BitConverter.ToInt16(record.Data, 18);
-                if (urlLength > 0 && record.Data.Length >= 20 + urlLength)
-                {
-                    hyperlink.Target = System.Text.Encoding.ASCII.GetString(record.Data, 20, urlLength);
-                }
-                
-                worksheet.Hyperlinks.Add(hyperlink);
-            }
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 20)
+                return;
+            var hyperlink = new Hyperlink();
+            ushort firstRow = BitConverter.ToUInt16(data, 0);
+            ushort lastRow = BitConverter.ToUInt16(data, 2);
+            ushort firstCol = BitConverter.ToUInt16(data, 4);
+            ushort lastCol = BitConverter.ToUInt16(data, 6);
+            hyperlink.Range = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
+            int urlLength = BitConverter.ToInt16(data, 18);
+            if (urlLength > 0 && data.Length >= 20 + urlLength)
+                hyperlink.Target = System.Text.Encoding.ASCII.GetString(data, 20, urlLength);
+            worksheet.Hyperlinks.Add(hyperlink);
         }
 
         private void ParseCommentRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析注释记录
-            if (record.Data != null && record.Data.Length >= 12)
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 12)
+                return;
+            var comment = new Comment();
+            ushort row = BitConverter.ToUInt16(data, 0);
+            ushort col = BitConverter.ToUInt16(data, 2);
+            comment.RowIndex = row + 1;
+            comment.ColumnIndex = col + 1;
+            if (data.Length >= 14)
             {
-                var comment = new Comment();
-                
-                // 解析行和列索引
-                ushort row = BitConverter.ToUInt16(record.Data, 0);
-                ushort col = BitConverter.ToUInt16(record.Data, 2);
-                comment.RowIndex = row + 1; // 转换为1-based索引
-                comment.ColumnIndex = col + 1; // 转换为1-based索引
-                
-                // 解析作者和注释文本
-                if (record.Data.Length >= 14)
+                byte authorLength = data[12];
+                if (authorLength > 0 && data.Length >= 13 + authorLength)
                 {
-                    // 读取作者长度
-                    byte authorLength = record.Data[12];
-                    if (authorLength > 0 && record.Data.Length >= 13 + authorLength)
-                    {
-                        // 读取作者名称
-                        comment.Author = System.Text.Encoding.ASCII.GetString(record.Data, 13, authorLength);
-                        
-                        // 读取注释文本
-                        int textOffset = 13 + authorLength;
-                        if (record.Data.Length > textOffset)
-                        {
-                            // 简单实现，实际需要更复杂的解析逻辑
-                            comment.Text = System.Text.Encoding.ASCII.GetString(record.Data, textOffset, record.Data.Length - textOffset);
-                        }
-                    }
+                    comment.Author = System.Text.Encoding.ASCII.GetString(data, 13, authorLength);
+                    int textOffset = 13 + authorLength;
+                    if (data.Length > textOffset)
+                        comment.Text = System.Text.Encoding.ASCII.GetString(data, textOffset, data.Length - textOffset);
                 }
-                
-                worksheet.Comments.Add(comment);
             }
+            worksheet.Comments.Add(comment);
         }
 
         private string GetColumnLetter(int columnIndex)
@@ -1544,42 +1468,28 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private void ParseSheetRecord(BiffRecord record, Workbook workbook)
         {
-            // 解析工作表记录 (BOUNDSHEET / 0x0085)
             var worksheet = new Worksheet();
-            
-            if (record.Data != null && record.Data.Length >= 8)
+            byte[] data = record.GetAllData();
+            if (data != null && data.Length >= 8)
             {
-                // BIFF8 BoundSheet 记录:
-                //   Offset 0-3: lbPlyPos (工作表子流在 Workbook 流内的绝对偏移量)
-                //   Offset 4:   hsState (隐藏状态: 0=可见, 1=隐藏, 2=非常规隐藏)
-                //   Offset 5:   dt (工作表类型)
-                //   Offset 6+:  名称 (ShortXLUnicodeString)
-                int lbPlyPos = BitConverter.ToInt32(record.Data, 0);
+                int lbPlyPos = BitConverter.ToInt32(data, 0);
                 _sheetOffsets.Add(lbPlyPos);
                 Logger.Debug($"BOUNDSHEET: lbPlyPos={lbPlyPos}");
-
-                // 提取工作表名称
                 int nameOffset = 6;
-                if (record.Data.Length > nameOffset)
+                if (data.Length > nameOffset)
                 {
-                    byte len = record.Data[nameOffset];
+                    byte len = data[nameOffset];
                     int pos = nameOffset + 1;
-                    worksheet.Name = ReadBiffStringFromBytes(record.Data, ref pos, len);
+                    worksheet.Name = ReadBiffStringFromBytes(data, ref pos, len);
                 }
             }
-            else if (record.Data != null && record.Data.Length >= 4)
+            else if (data != null && data.Length >= 4)
             {
-                // 至少有 lbPlyPos
-                int lbPlyPos = BitConverter.ToInt32(record.Data, 0);
+                int lbPlyPos = BitConverter.ToInt32(data, 0);
                 _sheetOffsets.Add(lbPlyPos);
             }
-            
-            // 如果没有提取到名称，使用默认名称
             if (string.IsNullOrEmpty(worksheet.Name))
-            {
                 worksheet.Name = "Sheet" + (workbook.Worksheets.Count + 1);
-            }
-            
             workbook.Worksheets.Add(worksheet);
         }
 
