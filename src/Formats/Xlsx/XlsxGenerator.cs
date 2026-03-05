@@ -397,23 +397,33 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             using (var stream = entry.Open())
             using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
+                const string cpNs = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties";
+                const string dcNs = "http://purl.org/dc/elements/1.1/";
+                const string dctermsNs = "http://purl.org/dc/terms/";
+                const string dcmitypeNs = "http://purl.org/dc/dcmitype/";
+                const string xsiNs = "http://www.w3.org/2001/XMLSchema-instance";
+
                 writer.WriteStartDocument();
-                writer.WriteStartElement("cp:coreProperties", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties");
-                writer.WriteAttributeString("xmlns", "cp", null, "http://schemas.openxmlformats.org/package/2006/metadata/core-properties");
-                writer.WriteAttributeString("xmlns", "dc", null, "http://purl.org/dc/elements/1.1/");
-                writer.WriteAttributeString("xmlns", "dcterms", null, "http://purl.org/dc/terms/");
-                writer.WriteAttributeString("xmlns", "dcmitype", null, "http://purl.org/dc/dcmitype/");
-                writer.WriteAttributeString("xmlns", "xsi", null, "http://www.w3.org/2001/XMLSchema-instance");
-                writer.WriteElementString("dc:creator", "http://purl.org/dc/elements/1.1/", workbook.Author ?? "Nedev.XlsToXlsx");
-                writer.WriteStartElement("dcterms:created", "http://purl.org/dc/terms/");
-                writer.WriteAttributeString("xsi", "type", "http://www.w3.org/2001/XMLSchema-instance", "dcterms:W3CDTF");
+                writer.WriteStartElement("cp", "coreProperties", cpNs);
+                writer.WriteAttributeString("xmlns", "cp", null, cpNs);
+                writer.WriteAttributeString("xmlns", "dc", null, dcNs);
+                writer.WriteAttributeString("xmlns", "dcterms", null, dctermsNs);
+                writer.WriteAttributeString("xmlns", "dcmitype", null, dcmitypeNs);
+                writer.WriteAttributeString("xmlns", "xsi", null, xsiNs);
+
+                writer.WriteElementString("dc", "creator", dcNs, workbook.Author ?? "Nedev.XlsToXlsx");
+
+                writer.WriteStartElement("dcterms", "created", dctermsNs);
+                writer.WriteAttributeString("xsi", "type", xsiNs, "dcterms:W3CDTF");
                 writer.WriteString(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
                 writer.WriteEndElement();
-                writer.WriteStartElement("dcterms:modified", "http://purl.org/dc/terms/");
-                writer.WriteAttributeString("xsi", "type", "http://www.w3.org/2001/XMLSchema-instance", "dcterms:W3CDTF");
+
+                writer.WriteStartElement("dcterms", "modified", dctermsNs);
+                writer.WriteAttributeString("xsi", "type", xsiNs, "dcterms:W3CDTF");
                 writer.WriteString(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
                 writer.WriteEndElement();
-                writer.WriteEndElement();
+
+                writer.WriteEndElement(); // cp:coreProperties
                 writer.WriteEndDocument();
             }
         }
@@ -424,37 +434,49 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             using (var stream = entry.Open())
             using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
+                const string propsNs = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties";
+                const string vtNs = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes";
+
                 writer.WriteStartDocument();
-                writer.WriteStartElement("Properties", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties");
-                writer.WriteAttributeString("xmlns", "vt", null, "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
-                writer.WriteElementString("Application", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "Microsoft Excel");
-                writer.WriteElementString("DocSecurity", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "0");
-                writer.WriteElementString("ScaleCrop", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "false");
+                writer.WriteStartElement("Properties", propsNs);
+                writer.WriteAttributeString("xmlns", "vt", null, vtNs);
+                writer.WriteElementString("Application", propsNs, "Microsoft Excel");
+                writer.WriteElementString("DocSecurity", propsNs, "0");
+                writer.WriteElementString("ScaleCrop", propsNs, "false");
+
                 int sheetCount = workbook.Worksheets.Count > 0 ? workbook.Worksheets.Count : 1;
-                writer.WriteStartElement("HeadingPairs", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties");
-                writer.WriteStartElement("vt:vector", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
+
+                // HeadingPairs: vector of ("Worksheets", sheetCount)
+                writer.WriteStartElement("HeadingPairs", propsNs);
+                writer.WriteStartElement("vt", "vector", vtNs);
                 writer.WriteAttributeString("size", "2");
                 writer.WriteAttributeString("baseType", "variant");
-                writer.WriteStartElement("vt:variant", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
-                writer.WriteElementString("vt:lpstr", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes", "Worksheets");
+
+                writer.WriteStartElement("vt", "variant", vtNs);
+                writer.WriteElementString("vt", "lpstr", vtNs, "Worksheets");
                 writer.WriteEndElement();
-                writer.WriteStartElement("vt:variant", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
-                writer.WriteElementString("vt:i4", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes", sheetCount.ToString());
+
+                writer.WriteStartElement("vt", "variant", vtNs);
+                writer.WriteElementString("vt", "i4", vtNs, sheetCount.ToString());
                 writer.WriteEndElement();
-                writer.WriteEndElement();
-                writer.WriteEndElement();
-                writer.WriteStartElement("TitlesOfParts", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties");
-                writer.WriteStartElement("vt:vector", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
+
+                writer.WriteEndElement(); // vt:vector
+                writer.WriteEndElement(); // HeadingPairs
+
+                // TitlesOfParts: sheet names
+                writer.WriteStartElement("TitlesOfParts", propsNs);
+                writer.WriteStartElement("vt", "vector", vtNs);
                 writer.WriteAttributeString("size", sheetCount.ToString());
                 writer.WriteAttributeString("baseType", "lpstr");
                 for (int i = 0; i < sheetCount; i++)
                 {
                     string name = workbook.Worksheets.Count > 0 ? (workbook.Worksheets[i].Name ?? "Sheet" + (i + 1)) : "Sheet1";
-                    writer.WriteElementString("vt:lpstr", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes", name);
+                    writer.WriteElementString("vt", "lpstr", vtNs, name);
                 }
-                writer.WriteEndElement();
-                writer.WriteEndElement();
-                writer.WriteEndElement();
+                writer.WriteEndElement(); // vt:vector
+                writer.WriteEndElement(); // TitlesOfParts
+
+                writer.WriteEndElement(); // Properties
                 writer.WriteEndDocument();
             }
         }
@@ -717,8 +739,11 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         {
                             writer.WriteStartElement("c");
                             writer.WriteAttributeString("r", GetCellReference(row.RowIndex, cell.ColumnIndex));
+
+                            bool isDateCell = cell.Value is DateTime;
                             
-                            if (!string.IsNullOrEmpty(cell.DataType))
+                            // t 属性：日期单元格使用数值序列（不使用 t=\"d\"），避免 Sem_CellValue 错误
+                            if (!string.IsNullOrEmpty(cell.DataType) && !isDateCell)
                             {
                                 writer.WriteAttributeString("t", cell.DataType);
                             }
@@ -728,7 +753,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             {
                                 writer.WriteAttributeString("s", Math.Clamp(styleIdVal, 0, maxStyleId).ToString());
                             }
-                            else if (cell.Value is DateTime)
+                            else if (isDateCell)
                             {
                                 writer.WriteAttributeString("s", Math.Min(1, maxStyleId).ToString());
                             }
@@ -806,9 +831,10 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             else
                             {
                                 // 处理日期时间类型
-                                if (cell.Value is DateTime dateTime)
+                                if (isDateCell)
                                 {
-                                    // Excel 日期时间是从 1900-01-01 开始的天数
+                                    // Excel 日期时间是从 1900-01-01 开始的天数，使用数值序列存储
+                                    var dateTime = (DateTime)cell.Value!;
                                     double excelDate = DateTimeToExcelDate(dateTime);
                                     writer.WriteStartElement("v");
                                     writer.WriteString(excelDate.ToString());
@@ -1495,10 +1521,11 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     foreach (var xf in xfs)
                     {
                         writer.WriteStartElement("xf");
-                        int numFmtId = xf.NumberFormatIndex >= 0 ? Math.Min(xf.NumberFormatIndex, 164) : 0;
-                        int fontId = xf.FontIndex >= 0 ? Math.Min(xf.FontIndex, maxFontId) : 0;
-                        int fillId = xf.FillIndex >= 0 ? Math.Min(xf.FillIndex, maxFillId) : 0;
-                        int borderId = xf.BorderIndex >= 0 ? Math.Min(xf.BorderIndex, maxBorderId) : 0;
+                        // Xf.NumberFormatIndex / FontIndex are ushort; clamp after casting to int to avoid ambiguous Math.Min overloads
+                        int numFmtId = xf.NumberFormatIndex > 0 ? Math.Min((int)xf.NumberFormatIndex, 164) : 0;
+                        int fontId = xf.FontIndex > 0 ? Math.Min((int)xf.FontIndex, maxFontId) : 0;
+                        int fillId = xf.FillIndex > 0 ? Math.Min(xf.FillIndex, maxFillId) : 0;
+                        int borderId = xf.BorderIndex > 0 ? Math.Min(xf.BorderIndex, maxBorderId) : 0;
                         writer.WriteAttributeString("numFmtId", numFmtId.ToString());
                         writer.WriteAttributeString("fontId", fontId.ToString());
                         writer.WriteAttributeString("fillId", fillId.ToString());
