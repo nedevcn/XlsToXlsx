@@ -214,6 +214,7 @@ namespace Nedev.XlsToXlsx
             var xlsxGenerator = new Formats.Xlsx.XlsxGenerator(outputStream);
             xlsxGenerator.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
             xlsxGenerator.Generate(workbook);
+            outputStream.Flush();
             
             progressUpdate?.Invoke(100, "XLSX文件生成完成");
         }
@@ -241,6 +242,7 @@ namespace Nedev.XlsToXlsx
             var xlsxGenerator = new Formats.Xlsx.XlsxGenerator(outputStream);
             xlsxGenerator.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
             await xlsxGenerator.GenerateAsync(workbook);
+            await outputStream.FlushAsync();
             
             progressUpdate?.Invoke(100, "XLSX文件生成完成");
         }

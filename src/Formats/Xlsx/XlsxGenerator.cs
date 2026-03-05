@@ -1,5 +1,7 @@
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
+using System.Text;
 using System.Xml;
 using Nedev.XlsToXlsx;
 using Nedev.XlsToXlsx.Exceptions;
@@ -46,6 +48,20 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             ).ToArray());
         }
 
+        /// <summary>
+        /// True when the sheet has at least one picture with data or one chart. We do not create a drawing part for
+        /// EmbeddedObjects-only or pictures-without-data, to avoid empty/invalid drawing parts and rId/media mismatches.
+        /// </summary>
+        private static bool SheetHasDrawings(Worksheet ws)
+        {
+            if (ws == null) return false;
+            if (ws.Pictures != null && ws.Pictures.Any(p => p != null && p.Data != null && p.Data.Length > 0))
+                return true;
+            if (ws.Charts != null && ws.Charts.Count > 0)
+                return true;
+            return false;
+        }
+
         public void Generate(Workbook workbook)
         {
             // 验证workbook对象
@@ -74,6 +90,9 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     // 创建_rels/.rels
                     CreateRelsXml(archive);
                     Logger.Info("创建_rels/.rels完成");
+
+                    CreateDocPropsCoreXml(archive, workbook);
+                    CreateDocPropsAppXml(archive, workbook);
 
                     // 创建xl/workbook.xml
                     CreateWorkbookXml(archive, workbook);
@@ -197,7 +216,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         {
             var entry = archive.CreateEntry("[Content_Types].xml");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("Types", "http://schemas.openxmlformats.org/package/2006/content-types");
@@ -250,6 +269,25 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement();
                 }
                 
+                writer.WriteStartElement("Override");
+                writer.WriteAttributeString("PartName", "/docProps/core.xml");
+                writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-package.core-properties+xml");
+                writer.WriteEndElement();
+                writer.WriteStartElement("Override");
+                writer.WriteAttributeString("PartName", "/docProps/app.xml");
+                writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.extended-properties+xml");
+                writer.WriteEndElement();
+                // 包关系（部分验证器要求显式声明）
+                writer.WriteStartElement("Override");
+                writer.WriteAttributeString("PartName", "/_rels/.rels");
+                writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-package.relationships+xml");
+                writer.WriteEndElement();
+                
+                writer.WriteStartElement("Override");
+                writer.WriteAttributeString("PartName", "/xl/_rels/workbook.xml.rels");
+                writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-package.relationships+xml");
+                writer.WriteEndElement();
+                
                 // 工作簿内容类型（VBA 时使用 macro-enabled 类型）
                 writer.WriteStartElement("Override");
                 writer.WriteAttributeString("PartName", "/xl/workbook.xml");
@@ -283,20 +321,20 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement();
                 }
                 
-                // 图表内容类型
+                // Drawing and chart content types (every part we create must be declared)
                 int chartIndex = 1;
                 for (int i = 0; i < workbook.Worksheets.Count; i++)
                 {
                     var ws = workbook.Worksheets[i];
-                    if (ws.Charts.Count > 0)
+                    bool hasDrawings = SheetHasDrawings(ws);
+                    if (hasDrawings)
                     {
-                        // Drawing
+                        // Drawing part (required for Pictures, EmbeddedObjects, or Charts)
                         writer.WriteStartElement("Override");
                         writer.WriteAttributeString("PartName", $"/xl/drawings/drawing{i + 1}.xml");
                         writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.drawing+xml");
                         writer.WriteEndElement();
                         
-                        // Charts
                         for (int j = 0; j < ws.Charts.Count; j++)
                         {
                             writer.WriteStartElement("Override");
@@ -306,15 +344,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             chartIndex++;
                         }
                     }
-                    
-                    // Comments
-                    if (ws.Comments != null && ws.Comments.Count > 0)
-                    {
-                        writer.WriteStartElement("Override");
-                        writer.WriteAttributeString("PartName", $"/xl/comments{i + 1}.xml");
-                        writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml");
-                        writer.WriteEndElement();
-                    }
+                    // Do not add Override for /xl/comments{i+1}.xml — we only create VML (vmlDrawing), not the comments part
                 }
                 
                 // VBA项目内容类型
@@ -335,7 +365,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         {
             var entry = archive.CreateEntry("_rels/.rels");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
@@ -345,7 +375,85 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument");
                 writer.WriteAttributeString("Target", "xl/workbook.xml");
                 writer.WriteEndElement();
+                writer.WriteStartElement("Relationship");
+                writer.WriteAttributeString("Id", "rId2");
+                writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties");
+                writer.WriteAttributeString("Target", "docProps/core.xml");
+                writer.WriteEndElement();
+                writer.WriteStartElement("Relationship");
+                writer.WriteAttributeString("Id", "rId3");
+                writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties");
+                writer.WriteAttributeString("Target", "docProps/app.xml");
+                writer.WriteEndElement();
                 
+                writer.WriteEndElement();
+                writer.WriteEndDocument();
+            }
+        }
+
+        private void CreateDocPropsCoreXml(ZipArchive archive, Workbook workbook)
+        {
+            var entry = archive.CreateEntry("docProps/core.xml");
+            using (var stream = entry.Open())
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("cp:coreProperties", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties");
+                writer.WriteAttributeString("xmlns", "cp", null, "http://schemas.openxmlformats.org/package/2006/metadata/core-properties");
+                writer.WriteAttributeString("xmlns", "dc", null, "http://purl.org/dc/elements/1.1/");
+                writer.WriteAttributeString("xmlns", "dcterms", null, "http://purl.org/dc/terms/");
+                writer.WriteAttributeString("xmlns", "dcmitype", null, "http://purl.org/dc/dcmitype/");
+                writer.WriteAttributeString("xmlns", "xsi", null, "http://www.w3.org/2001/XMLSchema-instance");
+                writer.WriteElementString("dc:creator", "http://purl.org/dc/elements/1.1/", workbook.Author ?? "Nedev.XlsToXlsx");
+                writer.WriteStartElement("dcterms:created", "http://purl.org/dc/terms/");
+                writer.WriteAttributeString("xsi", "type", "http://www.w3.org/2001/XMLSchema-instance", "dcterms:W3CDTF");
+                writer.WriteString(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                writer.WriteEndElement();
+                writer.WriteStartElement("dcterms:modified", "http://purl.org/dc/terms/");
+                writer.WriteAttributeString("xsi", "type", "http://www.w3.org/2001/XMLSchema-instance", "dcterms:W3CDTF");
+                writer.WriteString(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                writer.WriteEndDocument();
+            }
+        }
+
+        private void CreateDocPropsAppXml(ZipArchive archive, Workbook workbook)
+        {
+            var entry = archive.CreateEntry("docProps/app.xml");
+            using (var stream = entry.Open())
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("Properties", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties");
+                writer.WriteAttributeString("xmlns", "vt", null, "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
+                writer.WriteElementString("Application", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "Microsoft Excel");
+                writer.WriteElementString("DocSecurity", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "0");
+                writer.WriteElementString("ScaleCrop", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "false");
+                int sheetCount = workbook.Worksheets.Count > 0 ? workbook.Worksheets.Count : 1;
+                writer.WriteStartElement("HeadingPairs", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties");
+                writer.WriteStartElement("vt:vector", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
+                writer.WriteAttributeString("size", "2");
+                writer.WriteAttributeString("baseType", "variant");
+                writer.WriteStartElement("vt:variant", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
+                writer.WriteElementString("vt:lpstr", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes", "Worksheets");
+                writer.WriteEndElement();
+                writer.WriteStartElement("vt:variant", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
+                writer.WriteElementString("vt:i4", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes", sheetCount.ToString());
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                writer.WriteEndElement();
+                writer.WriteStartElement("TitlesOfParts", "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties");
+                writer.WriteStartElement("vt:vector", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes");
+                writer.WriteAttributeString("size", sheetCount.ToString());
+                writer.WriteAttributeString("baseType", "lpstr");
+                for (int i = 0; i < sheetCount; i++)
+                {
+                    string name = workbook.Worksheets.Count > 0 ? (workbook.Worksheets[i].Name ?? "Sheet" + (i + 1)) : "Sheet1";
+                    writer.WriteElementString("vt:lpstr", "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes", name);
+                }
+                writer.WriteEndElement();
+                writer.WriteEndElement();
                 writer.WriteEndElement();
                 writer.WriteEndDocument();
             }
@@ -355,7 +463,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         {
             var entry = archive.CreateEntry("xl/workbook.xml");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("workbook", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
@@ -414,7 +522,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         {
             var entry = archive.CreateEntry("xl/_rels/workbook.xml.rels");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
@@ -469,19 +577,38 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             }
         }
 
+        private static readonly XmlWriterSettings WorksheetXmlSettings = new XmlWriterSettings
+        {
+            Indent = false,
+            OmitXmlDeclaration = false,
+            Encoding = new UTF8Encoding(false)
+        };
+
+        private static readonly XmlWriterSettings Utf8NoBomXmlSettings = new XmlWriterSettings
+        {
+            Indent = false,
+            OmitXmlDeclaration = false,
+            Encoding = new UTF8Encoding(false)
+        };
+
         private void CreateWorksheetXml(ZipArchive archive, Worksheet worksheet, int sheetIndex, Workbook workbook)
         {
             var entry = archive.CreateEntry($"xl/worksheets/sheet{sheetIndex}.xml");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, WorksheetXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("worksheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
                 writer.WriteAttributeString("xmlns", "r", null, "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
                 
-                // dimension（工作表范围）
+                int styleCount = (workbook.XfList != null && workbook.XfList.Count > 0) ? workbook.XfList.Count : 1;
+                int maxStyleId = Math.Max(0, styleCount - 1);
+                
+                // dimension（工作表范围；Excel 最大行 1048576，最大列 16384）
                 writer.WriteStartElement("dimension");
-                string maxRef = GetCellReference(Math.Max(1, worksheet.MaxRow), Math.Max(1, worksheet.MaxColumn));
+                int maxRow = Math.Clamp(Math.Max(1, worksheet.MaxRow), 1, 1048576);
+                int maxCol = Math.Clamp(Math.Max(1, worksheet.MaxColumn), 1, 16384);
+                string maxRef = GetCellReference(maxRow, maxCol);
                 writer.WriteAttributeString("ref", $"A1:{maxRef}");
                 writer.WriteEndElement(); // dimension
                 
@@ -563,8 +690,10 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement(); // cols
                 }
                 
+                // sheetData (defensive: Rows can be null if worksheet was built incorrectly)
+                var rows = worksheet.Rows ?? Enumerable.Empty<Row>();
                 writer.WriteStartElement("sheetData");
-                foreach (var row in worksheet.Rows)
+                foreach (var row in rows)
                 {
                     writer.WriteStartElement("row");
                     writer.WriteAttributeString("r", row.RowIndex.ToString());
@@ -594,14 +723,14 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                                 writer.WriteAttributeString("t", cell.DataType);
                             }
                             
-                            // 样式ID
-                            if (!string.IsNullOrEmpty(cell.StyleId))
+                            // 样式ID (clamp to valid cellXfs index to avoid "Repaired Records: Format" corruption)
+                            if (!string.IsNullOrEmpty(cell.StyleId) && int.TryParse(cell.StyleId, out int styleIdVal))
                             {
-                                writer.WriteAttributeString("s", cell.StyleId);
+                                writer.WriteAttributeString("s", Math.Clamp(styleIdVal, 0, maxStyleId).ToString());
                             }
                             else if (cell.Value is DateTime)
                             {
-                                writer.WriteAttributeString("s", "1");
+                                writer.WriteAttributeString("s", Math.Min(1, maxStyleId).ToString());
                             }
                             
                             // 处理公式
@@ -687,19 +816,17 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                                 }
                                 else if (cell.DataType == "s")
                                 {
-                                    // 共享字符串类型，写入索引
+                                    // 共享字符串类型，写入索引（必须落在 [0, SharedStrings.Count-1] 否则会报错）
+                                    var sharedList = workbook.SharedStrings ?? Enumerable.Empty<string>().ToList();
                                     var textValue = cell.Value?.ToString();
                                     writer.WriteStartElement("v");
+                                    int ssIndex = 0;
                                     if (!string.IsNullOrEmpty(textValue))
                                     {
-                                        // 查找字符串在共享字符串表中的索引
-                                        int index = workbook.SharedStrings.IndexOf(textValue);
-                                        writer.WriteString(index >= 0 ? index.ToString() : "0");
+                                        int idx = sharedList.IndexOf(textValue);
+                                        ssIndex = idx >= 0 ? Math.Min(idx, Math.Max(0, sharedList.Count - 1)) : 0;
                                     }
-                                    else
-                                    {
-                                        writer.WriteString("0");
-                                    }
+                                    writer.WriteString(ssIndex.ToString());
                                     writer.WriteEndElement();
                                 }
                                 else if (cell.Value != null)
@@ -744,44 +871,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement();
                 }
                 
-                // 写入数据验证信息
-                if (worksheet.DataValidations != null && worksheet.DataValidations.Count > 0)
-                {
-                    writer.WriteStartElement("dataValidations");
-                    writer.WriteAttributeString("count", worksheet.DataValidations.Count.ToString());
-                    
-                    foreach (var dv in worksheet.DataValidations)
-                    {
-                        writer.WriteStartElement("dataValidation");
-                        if (!string.IsNullOrEmpty(dv.Range))
-                        {
-                            writer.WriteAttributeString("sqref", dv.Range);
-                        }
-                        if (!string.IsNullOrEmpty(dv.Type))
-                        {
-                            writer.WriteAttributeString("type", dv.Type);
-                        }
-                        if (!string.IsNullOrEmpty(dv.Operator))
-                        {
-                            writer.WriteAttributeString("operator", dv.Operator);
-                        }
-                        writer.WriteAttributeString("allowBlank", dv.AllowBlank.ToString().ToLower());
-                        // formula1/formula2 必须是子元素，不是属性 (OOXML 规范)
-                        if (!string.IsNullOrEmpty(dv.Formula1))
-                        {
-                            writer.WriteElementString("formula1", dv.Formula1);
-                        }
-                        if (!string.IsNullOrEmpty(dv.Formula2))
-                        {
-                            writer.WriteElementString("formula2", dv.Formula2);
-                        }
-                        writer.WriteEndElement();
-                    }
-                    
-                    writer.WriteEndElement();
-                }
-                
-                // 写入条件格式信息
+                // 写入条件格式信息 (OOXML 要求 conditionalFormatting 在 dataValidations 之前)
                 if (worksheet.ConditionalFormats != null && worksheet.ConditionalFormats.Count > 0)
                 {
                     int cfPriority = 1; // 每个 cfRule 必须有唯一的 priority
@@ -862,6 +952,42 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     }
                 }
                 
+                // 写入数据验证信息 (必须在 conditionalFormatting 之后，pageMargins 之前)
+                if (worksheet.DataValidations != null && worksheet.DataValidations.Count > 0)
+                {
+                    writer.WriteStartElement("dataValidations");
+                    writer.WriteAttributeString("count", worksheet.DataValidations.Count.ToString());
+                    
+                    foreach (var dv in worksheet.DataValidations)
+                    {
+                        writer.WriteStartElement("dataValidation");
+                        if (!string.IsNullOrEmpty(dv.Range))
+                        {
+                            writer.WriteAttributeString("sqref", dv.Range);
+                        }
+                        if (!string.IsNullOrEmpty(dv.Type))
+                        {
+                            writer.WriteAttributeString("type", dv.Type);
+                        }
+                        if (!string.IsNullOrEmpty(dv.Operator))
+                        {
+                            writer.WriteAttributeString("operator", dv.Operator);
+                        }
+                        writer.WriteAttributeString("allowBlank", dv.AllowBlank.ToString().ToLower());
+                        if (!string.IsNullOrEmpty(dv.Formula1))
+                        {
+                            writer.WriteElementString("formula1", dv.Formula1);
+                        }
+                        if (!string.IsNullOrEmpty(dv.Formula2))
+                        {
+                            writer.WriteElementString("formula2", dv.Formula2);
+                        }
+                        writer.WriteEndElement();
+                    }
+                    
+                    writer.WriteEndElement();
+                }
+                
                 // P3: pageMargins (页面边距) - 必须在 sheetData 之后
                 var ps = worksheet.PageSettings;
                 writer.WriteStartElement("pageMargins");
@@ -898,8 +1024,9 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement(); // headerFooter
                 }
 
-                // 生成图表引用 (必须在 pageSetup/headerFooter 之后)
-                if (worksheet.Charts.Count > 0)
+                // 生成 drawing 引用 (仅当有图片数据或图表时；必须在 pageSetup/headerFooter 之后)
+                bool hasDrawings = SheetHasDrawings(worksheet);
+                if (hasDrawings)
                 {
                     writer.WriteStartElement("drawing");
                     writer.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rIdDrawing" + sheetIndex);
@@ -923,7 +1050,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         {
             // 只有在有注释、图表、图片或超链接时才创建关系文件
             bool hasComments = worksheet.Comments != null && worksheet.Comments.Count > 0;
-            bool hasDrawings = worksheet.Pictures.Count > 0 || worksheet.EmbeddedObjects.Count > 0 || worksheet.Charts.Count > 0;
+            bool hasDrawings = SheetHasDrawings(worksheet);
             bool hasHyperlinks = worksheet.Hyperlinks != null && worksheet.Hyperlinks.Count > 0;
             
             if (!hasComments && !hasDrawings && !hasHyperlinks)
@@ -933,7 +1060,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             
             var entry = archive.CreateEntry($"xl/worksheets/_rels/sheet{sheetIndex}.xml.rels");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
@@ -983,7 +1110,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             // 创建VML绘图文件
             var vmlEntry = archive.CreateEntry($"xl/drawings/vmlDrawing{sheetIndex}.vml");
             using (var stream = vmlEntry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("xml", "urn:schemas-microsoft-com:vml");
@@ -1068,7 +1195,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             {
                 var entry = archive.CreateEntry("xl/styles.xml");
                 using (var stream = entry.Open())
-                using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+                using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
                 {
                     writer.WriteStartDocument();
                     writer.WriteStartElement("styleSheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
@@ -1131,7 +1258,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         }
                     }
                     
-                    writer.WriteAttributeString("count", fontCount.ToString());
+                    writer.WriteAttributeString("count", fonts.Count.ToString());
                     
                     foreach (var font in fonts)
                     {
@@ -1362,22 +1489,29 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     
                     Logger.Info($"写入 styles.xml: fonts={workbook.Fonts.Count}, fills={fills.Count}, borders={borders.Count}, xfs={xfs.Count}");
                     writer.WriteAttributeString("count", xfs.Count.ToString());
+                    int maxFontId = Math.Max(0, fonts.Count - 1);
+                    int maxFillId = Math.Max(0, fills.Count - 1);
+                    int maxBorderId = Math.Max(0, borders.Count - 1);
                     foreach (var xf in xfs)
                     {
                         writer.WriteStartElement("xf");
-                        writer.WriteAttributeString("numFmtId", xf.NumberFormatIndex.ToString());
-                        writer.WriteAttributeString("fontId", xf.FontIndex.ToString());
-                        writer.WriteAttributeString("fillId", xf.FillIndex.ToString());
-                        writer.WriteAttributeString("borderId", xf.BorderIndex.ToString());
+                        int numFmtId = xf.NumberFormatIndex >= 0 ? Math.Min(xf.NumberFormatIndex, 164) : 0;
+                        int fontId = xf.FontIndex >= 0 ? Math.Min(xf.FontIndex, maxFontId) : 0;
+                        int fillId = xf.FillIndex >= 0 ? Math.Min(xf.FillIndex, maxFillId) : 0;
+                        int borderId = xf.BorderIndex >= 0 ? Math.Min(xf.BorderIndex, maxBorderId) : 0;
+                        writer.WriteAttributeString("numFmtId", numFmtId.ToString());
+                        writer.WriteAttributeString("fontId", fontId.ToString());
+                        writer.WriteAttributeString("fillId", fillId.ToString());
+                        writer.WriteAttributeString("borderId", borderId.ToString());
                         writer.WriteAttributeString("xfId", "0");
                         
-                        if (xf.NumberFormatIndex > 0)
+                        if (numFmtId > 0)
                             writer.WriteAttributeString("applyNumberFormat", "1");
-                        if (xf.FontIndex > 0)
+                        if (fontId > 0)
                             writer.WriteAttributeString("applyFont", "1");
-                        if (xf.FillIndex > 0)
+                        if (fillId > 0)
                             writer.WriteAttributeString("applyFill", "1");
-                        if (xf.BorderIndex > 0)
+                        if (borderId > 0)
                             writer.WriteAttributeString("applyBorder", "1");
                         
                         if (xf.ApplyAlignment || (!string.IsNullOrEmpty(xf.HorizontalAlignment) || !string.IsNullOrEmpty(xf.VerticalAlignment) || xf.WrapText || xf.Indent > 0))
@@ -1430,7 +1564,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             foreach (var worksheet in workbook.Worksheets)
             {
                 // 遍历所有行和单元格
-                foreach (var row in worksheet.Rows)
+                foreach (var row in worksheet.Rows ?? Enumerable.Empty<Row>())
                 {
                     foreach (var cell in row.Cells)
                     {
@@ -1454,7 +1588,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             
             var entry = archive.CreateEntry("xl/sharedStrings.xml");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("sst", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
@@ -1478,17 +1612,16 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         
         private void CreateDrawings(ZipArchive archive, Workbook workbook)
         {
-            // 创建drawings目录
-            archive.CreateEntry("xl/drawings/");
-            archive.CreateEntry("xl/media/");
-            
-            // 为每个工作表创建drawing.xml文件
+            // Do not CreateEntry("xl/drawings/") or ("xl/media/") — directory-only entries are not OOXML parts
+            // and cause "file corrupted" because they are not declared in [Content_Types].xml.
+            int globalImageIndex = 1;
+            int globalChartIndex = 1;
             for (int i = 0; i < workbook.Worksheets.Count; i++)
             {
                 var worksheet = workbook.Worksheets[i];
-                if (worksheet.Pictures.Count > 0 || worksheet.EmbeddedObjects.Count > 0 || worksheet.Charts.Count > 0)
+                if (SheetHasDrawings(worksheet))
                 {
-                    // 为每个图片创建媒体文件
+                    int sheetStartImageIndex = globalImageIndex;
                     for (int j = 0; j < worksheet.Pictures.Count; j++)
                     {
                         var picture = worksheet.Pictures[j];
@@ -1497,11 +1630,12 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             try
                             {
                                 string extension = picture.Extension ?? "bmp";
-                                var entry = archive.CreateEntry($"xl/media/image{j + 1}.{extension}");
+                                var entry = archive.CreateEntry($"xl/media/image{globalImageIndex}.{extension}");
                                 using (var stream = entry.Open())
                                 {
                                     stream.Write(picture.Data, 0, picture.Data.Length);
                                 }
+                                globalImageIndex++;
                             }
                             catch (Exception ex)
                             {
@@ -1519,13 +1653,14 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         throw new ChartProcessingException($"创建绘图XML时发生错误: {ex.Message}", ex);
                     }
                     
-                    // 为每个图表创建图表文件
+                    int sheetStartChartIndex = globalChartIndex;
                     for (int j = 0; j < worksheet.Charts.Count; j++)
                     {
                         var chart = worksheet.Charts[j];
                         try
                         {
-                            CreateChartXml(archive, chart, i + 1, j + 1);
+                            CreateChartXml(archive, chart, i + 1, globalChartIndex);
+                            globalChartIndex++;
                         }
                         catch (Exception ex)
                         {
@@ -1533,41 +1668,39 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         }
                     }
                     
-                    // 生成 drawing rels
-                    CreateDrawingRelsXml(archive, worksheet, i + 1);
+                    CreateDrawingRelsXml(archive, worksheet, i + 1, sheetStartImageIndex, sheetStartChartIndex);
                 }
             }
         }
         
-        private void CreateDrawingRelsXml(ZipArchive archive, Worksheet worksheet, int sheetIndex)
+        private void CreateDrawingRelsXml(ZipArchive archive, Worksheet worksheet, int sheetIndex, int firstImageIndex, int firstChartIndex)
         {
             var entry = archive.CreateEntry($"xl/drawings/_rels/drawing{sheetIndex}.xml.rels");
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
                 
-                // 为每个图片添加关系
-                for (int j = 0; j < worksheet.Pictures.Count; j++)
+                int imageOffset = 0;
+                foreach (var picture in worksheet.Pictures ?? Enumerable.Empty<Picture>())
                 {
-                    var picture = worksheet.Pictures[j];
+                    if (picture?.Data == null || picture.Data.Length == 0) continue;
                     string extension = picture.Extension ?? "bmp";
-                    
                     writer.WriteStartElement("Relationship");
-                    writer.WriteAttributeString("Id", "rId" + (j + 1));
+                    writer.WriteAttributeString("Id", "rId" + (imageOffset + 1));
                     writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image");
-                    writer.WriteAttributeString("Target", $"../media/image{j + 1}.{extension}");
+                    writer.WriteAttributeString("Target", $"../media/image{firstImageIndex + imageOffset}.{extension}");
                     writer.WriteEndElement();
+                    imageOffset++;
                 }
                 
-                // 为每个图表添加关系
-                for (int j = 0; j < worksheet.Charts.Count; j++)
+                for (int j = 0; j < (worksheet.Charts?.Count ?? 0); j++)
                 {
                     writer.WriteStartElement("Relationship");
                     writer.WriteAttributeString("Id", "rIdChart" + (j + 1));
                     writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart");
-                    writer.WriteAttributeString("Target", $"../charts/chart{j + 1}.xml");
+                    writer.WriteAttributeString("Target", $"../charts/chart{firstChartIndex + j}.xml");
                     writer.WriteEndElement();
                 }
                 
@@ -1576,86 +1709,63 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             }
         }
         
+        private const long EmuPerPixel = 9525L; // DrawingML: 1 pixel = 9525 EMU
+
         private void CreateDrawingXml(ZipArchive archive, Worksheet worksheet, int sheetIndex, Workbook workbook)
         {
             var entry = archive.CreateEntry($"xl/drawings/drawing{sheetIndex}.xml");
+            string xdrNs = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
             using (var stream = entry.Open())
-            using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+            using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
             {
                 writer.WriteStartDocument();
-                writer.WriteStartElement("wsDr", "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing");
+                writer.WriteStartElement("wsDr", xdrNs);
                 writer.WriteAttributeString("xmlns", "r", null, "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
                 writer.WriteAttributeString("xmlns", "a", null, "http://schemas.openxmlformats.org/drawingml/2006/main");
                 
-                // 写入图片
-                for (int i = 0; i < worksheet.Pictures.Count; i++)
+                int picIndex = 0;
+                foreach (var picture in worksheet.Pictures ?? Enumerable.Empty<Picture>())
                 {
-                    var picture = worksheet.Pictures[i];
-                    writer.WriteStartElement("twoCellAnchor");
+                    if (picture?.Data == null || picture.Data.Length == 0) continue;
+                    long leftEmu = (long)picture.Left * EmuPerPixel;
+                    long topEmu = (long)picture.Top * EmuPerPixel;
+                    long wEmu = (long)Math.Max(1, picture.Width) * EmuPerPixel;
+                    long hEmu = (long)Math.Max(1, picture.Height) * EmuPerPixel;
+                    long colWidthEmu = (long)(8.43 * 7 * EmuPerPixel);
+                    long rowHeightEmu = (long)(15 * EmuPerPixel);
+                    int col = (int)(leftEmu / colWidthEmu);
+                    long colOff = leftEmu % colWidthEmu;
+                    int row = (int)(topEmu / rowHeightEmu);
+                    long rowOff = topEmu % rowHeightEmu;
+                    int endCol = (int)((leftEmu + wEmu) / colWidthEmu);
+                    long endColOff = (leftEmu + wEmu) % colWidthEmu;
+                    int endRow = (int)((topEmu + hEmu) / rowHeightEmu);
+                    long endRowOff = (topEmu + hEmu) % rowHeightEmu;
+                    col = Math.Max(0, col);
+                    row = Math.Max(0, row);
+                    endCol = Math.Max(col + 1, endCol);
+                    endRow = Math.Max(row + 1, endRow);
                     
-                    // 写入图片位置
-                    writer.WriteStartElement("from");
-                    
-                    // 计算列和列偏移（Excel的单位是1/1024英寸，这里转换为EMU单位）
-                    double colWidth = 8.43; // 默认列宽（字符）
-                    double colPixels = colWidth * 7; // 每个字符约7像素
-                    double emuPerPixel = 9525; // 1像素 = 9525 EMU
-                    
-                    double leftEmu = picture.Left * emuPerPixel;
-                    int col = (int)(leftEmu / (colPixels * emuPerPixel));
-                    long colOff = (long)(leftEmu % (colPixels * emuPerPixel));
-                    
-                    // 计算行和行偏移
-                    double rowHeight = 15; // 默认行高（像素）
-                    double topEmu = picture.Top * emuPerPixel;
-                    int row = (int)(topEmu / (rowHeight * emuPerPixel));
-                    long rowOff = (long)(topEmu % (rowHeight * emuPerPixel));
-                    
-                    writer.WriteStartElement("col");
-                    writer.WriteString(col.ToString());
+                    writer.WriteStartElement("twoCellAnchor", xdrNs);
+                    writer.WriteAttributeString("editAs", "twoCell");
+                    writer.WriteStartElement("from", xdrNs);
+                    writer.WriteElementString("col", xdrNs, col.ToString());
+                    writer.WriteElementString("colOff", xdrNs, colOff.ToString());
+                    writer.WriteElementString("row", xdrNs, row.ToString());
+                    writer.WriteElementString("rowOff", xdrNs, rowOff.ToString());
                     writer.WriteEndElement();
-                    writer.WriteStartElement("colOff");
-                    writer.WriteString(colOff.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("row");
-                    writer.WriteString(row.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("rowOff");
-                    writer.WriteString(rowOff.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                    
-                    writer.WriteStartElement("to");
-                    
-                    // 计算结束位置
-                    double rightEmu = (picture.Left + picture.Width) * emuPerPixel;
-                    int endCol = (int)(rightEmu / (colPixels * emuPerPixel));
-                    long endColOff = (long)(rightEmu % (colPixels * emuPerPixel));
-                    
-                    double bottomEmu = (picture.Top + picture.Height) * emuPerPixel;
-                    int endRow = (int)(bottomEmu / (rowHeight * emuPerPixel));
-                    long endRowOff = (long)(bottomEmu % (rowHeight * emuPerPixel));
-                    
-                    writer.WriteStartElement("col");
-                    writer.WriteString(endCol.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("colOff");
-                    writer.WriteString(endColOff.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("row");
-                    writer.WriteString(endRow.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("rowOff");
-                    writer.WriteString(endRowOff.ToString());
-                    writer.WriteEndElement();
+                    writer.WriteStartElement("to", xdrNs);
+                    writer.WriteElementString("col", xdrNs, endCol.ToString());
+                    writer.WriteElementString("colOff", xdrNs, endColOff.ToString());
+                    writer.WriteElementString("row", xdrNs, endRow.ToString());
+                    writer.WriteElementString("rowOff", xdrNs, endRowOff.ToString());
                     writer.WriteEndElement();
                     
-                    // 写入图片数据
                     writer.WriteStartElement("pic", "http://schemas.openxmlformats.org/drawingml/2006/picture");
                     writer.WriteStartElement("nvPicPr");
                     writer.WriteStartElement("cNvPr");
-                    writer.WriteAttributeString("id", (i + 1).ToString());
-                    writer.WriteAttributeString("name", $"Picture {i + 1}");
+                    writer.WriteAttributeString("id", (picIndex + 1).ToString());
+                    writer.WriteAttributeString("name", $"Picture {picIndex + 1}");
                     writer.WriteEndElement();
                     writer.WriteStartElement("cNvPicPr");
                     writer.WriteStartElement("picLocks");
@@ -1663,127 +1773,92 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement();
                     writer.WriteEndElement();
                     writer.WriteEndElement();
-                    
                     writer.WriteStartElement("blipFill");
                     writer.WriteStartElement("blip", "http://schemas.openxmlformats.org/drawingml/2006/main");
-                    writer.WriteAttributeString("r", "embed", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", $"rId{i + 1}");
+                    writer.WriteAttributeString("r", "embed", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", $"rId{picIndex + 1}");
                     writer.WriteEndElement();
                     writer.WriteStartElement("stretch", "http://schemas.openxmlformats.org/drawingml/2006/main");
                     writer.WriteStartElement("fillRect", "http://schemas.openxmlformats.org/drawingml/2006/main");
                     writer.WriteEndElement();
                     writer.WriteEndElement();
                     writer.WriteEndElement();
-                    
                     writer.WriteStartElement("spPr");
-                    writer.WriteStartElement("xfrm");
-                    writer.WriteStartElement("off");
-                    writer.WriteAttributeString("x", "0");
-                    writer.WriteAttributeString("y", "0");
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("ext");
-                    writer.WriteAttributeString("cx", picture.Width.ToString());
-                    writer.WriteAttributeString("cy", picture.Height.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("prstGeom");
-                    writer.WriteAttributeString("prst", "rect");
-                    writer.WriteStartElement("avLst");
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                    
-                    writer.WriteEndElement();
-                    // clientData 是 twoCellAnchor 的必需子元素
-                    writer.WriteStartElement("clientData");
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                }
-                
-                // 写入图表
-                for (int i = 0; i < worksheet.Charts.Count; i++)
-                {
-                    var chart = worksheet.Charts[i];
-                    writer.WriteStartElement("twoCellAnchor");
-                    
-                    // 写入图表位置
-                    writer.WriteStartElement("from");
-                    
-                    // 计算列和列偏移（Excel的单位是1/1024英寸，这里转换为EMU单位）
-                    double colWidth = 8.43; // 默认列宽（字符）
-                    double colPixels = colWidth * 7; // 每个字符约7像素
-                    double emuPerPixel = 9525; // 1像素 = 9525 EMU
-                    
-                    double leftEmu = chart.Left * emuPerPixel;
-                    int col = (int)(leftEmu / (colPixels * emuPerPixel));
-                    long colOff = (long)(leftEmu % (colPixels * emuPerPixel));
-                    
-                    // 计算行和行偏移
-                    double rowHeight = 15; // 默认行高（像素）
-                    double topEmu = chart.Top * emuPerPixel;
-                    int row = (int)(topEmu / (rowHeight * emuPerPixel));
-                    long rowOff = (long)(topEmu % (rowHeight * emuPerPixel));
-                    
-                    writer.WriteStartElement("col");
-                    writer.WriteString(col.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("colOff");
-                    writer.WriteString(colOff.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("row");
-                    writer.WriteString(row.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("rowOff");
-                    writer.WriteString(rowOff.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                    
-                    writer.WriteStartElement("to");
-                    
-                    // 计算结束位置
-                    double rightEmu = (chart.Left + chart.Width) * emuPerPixel;
-                    int endCol = (int)(rightEmu / (colPixels * emuPerPixel));
-                    long endColOff = (long)(rightEmu % (colPixels * emuPerPixel));
-                    
-                    double bottomEmu = (chart.Top + chart.Height) * emuPerPixel;
-                    int endRow = (int)(bottomEmu / (rowHeight * emuPerPixel));
-                    long endRowOff = (long)(bottomEmu % (rowHeight * emuPerPixel));
-                    
-                    writer.WriteStartElement("col");
-                    writer.WriteString(endCol.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("colOff");
-                    writer.WriteString(endColOff.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("row");
-                    writer.WriteString(endRow.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("rowOff");
-                    writer.WriteString(endRowOff.ToString());
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                    
-                    // 写入图表数据
-                    writer.WriteStartElement("graphicFrame");
-                    writer.WriteStartElement("nvGraphicFramePr");
-                    writer.WriteStartElement("cNvPr");
-                    writer.WriteAttributeString("id", (worksheet.Pictures.Count + i + 1).ToString());
-                    writer.WriteAttributeString("name", $"Chart {i + 1}");
-                    writer.WriteEndElement();
-                    writer.WriteStartElement("cNvGraphicFramePr");
-                    writer.WriteEndElement();
-                    writer.WriteEndElement();
-                    
                     writer.WriteStartElement("xfrm");
                     writer.WriteStartElement("off", "http://schemas.openxmlformats.org/drawingml/2006/main");
                     writer.WriteAttributeString("x", "0");
                     writer.WriteAttributeString("y", "0");
                     writer.WriteEndElement();
                     writer.WriteStartElement("ext", "http://schemas.openxmlformats.org/drawingml/2006/main");
-                    writer.WriteAttributeString("cx", chart.Width.ToString());
-                    writer.WriteAttributeString("cy", chart.Height.ToString());
+                    writer.WriteAttributeString("cx", wEmu.ToString());
+                    writer.WriteAttributeString("cy", hEmu.ToString());
                     writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("prstGeom", "http://schemas.openxmlformats.org/drawingml/2006/main");
+                    writer.WriteAttributeString("prst", "rect");
+                    writer.WriteStartElement("avLst", "http://schemas.openxmlformats.org/drawingml/2006/main");
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("clientData", xdrNs);
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    picIndex++;
+                }
+                
+                int pictureCountWithData = picIndex;
+                for (int i = 0; i < (worksheet.Charts?.Count ?? 0); i++)
+                {
+                    var chart = worksheet.Charts[i];
+                    long leftEmu = (long)chart.Left * EmuPerPixel;
+                    long topEmu = (long)chart.Top * EmuPerPixel;
+                    long wEmu = (long)Math.Max(1, chart.Width) * EmuPerPixel;
+                    long hEmu = (long)Math.Max(1, chart.Height) * EmuPerPixel;
+                    long colWidthEmu = (long)(8.43 * 7 * EmuPerPixel);
+                    long rowHeightEmu = (long)(15 * EmuPerPixel);
+                    int col = Math.Max(0, (int)(leftEmu / colWidthEmu));
+                    long colOff = leftEmu % colWidthEmu;
+                    int row = Math.Max(0, (int)(topEmu / rowHeightEmu));
+                    long rowOff = topEmu % rowHeightEmu;
+                    int endCol = Math.Max(col + 1, (int)((leftEmu + wEmu) / colWidthEmu));
+                    long endColOff = (leftEmu + wEmu) % colWidthEmu;
+                    int endRow = Math.Max(row + 1, (int)((topEmu + hEmu) / rowHeightEmu));
+                    long endRowOff = (topEmu + hEmu) % rowHeightEmu;
+                    
+                    writer.WriteStartElement("twoCellAnchor", xdrNs);
+                    writer.WriteAttributeString("editAs", "twoCell");
+                    writer.WriteStartElement("from", xdrNs);
+                    writer.WriteElementString("col", xdrNs, col.ToString());
+                    writer.WriteElementString("colOff", xdrNs, colOff.ToString());
+                    writer.WriteElementString("row", xdrNs, row.ToString());
+                    writer.WriteElementString("rowOff", xdrNs, rowOff.ToString());
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("to", xdrNs);
+                    writer.WriteElementString("col", xdrNs, endCol.ToString());
+                    writer.WriteElementString("colOff", xdrNs, endColOff.ToString());
+                    writer.WriteElementString("row", xdrNs, endRow.ToString());
+                    writer.WriteElementString("rowOff", xdrNs, endRowOff.ToString());
                     writer.WriteEndElement();
                     
+                    writer.WriteStartElement("graphicFrame");
+                    writer.WriteStartElement("nvGraphicFramePr");
+                    writer.WriteStartElement("cNvPr");
+                    writer.WriteAttributeString("id", (pictureCountWithData + i + 1).ToString());
+                    writer.WriteAttributeString("name", $"Chart {i + 1}");
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("cNvGraphicFramePr");
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("xfrm");
+                    writer.WriteStartElement("off", "http://schemas.openxmlformats.org/drawingml/2006/main");
+                    writer.WriteAttributeString("x", "0");
+                    writer.WriteAttributeString("y", "0");
+                    writer.WriteEndElement();
+                    writer.WriteStartElement("ext", "http://schemas.openxmlformats.org/drawingml/2006/main");
+                    writer.WriteAttributeString("cx", wEmu.ToString());
+                    writer.WriteAttributeString("cy", hEmu.ToString());
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
                     writer.WriteStartElement("graphic", "http://schemas.openxmlformats.org/drawingml/2006/main");
                     writer.WriteStartElement("graphicData", "http://schemas.openxmlformats.org/drawingml/2006/main");
                     writer.WriteAttributeString("uri", "http://schemas.openxmlformats.org/drawingml/2006/chart");
@@ -1792,44 +1867,14 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement();
                     writer.WriteEndElement();
                     writer.WriteEndElement();
-                    
                     writer.WriteEndElement();
-                    // clientData 是 twoCellAnchor 的必需子元素
-                    writer.WriteStartElement("clientData");
+                    writer.WriteStartElement("clientData", xdrNs);
                     writer.WriteEndElement();
                     writer.WriteEndElement();
                 }
                 
-                // 生成超链接
-                if (worksheet.Hyperlinks.Count > 0)
-                {
-                    writer.WriteStartElement("hyperlinks");
-                    writer.WriteAttributeString("count", worksheet.Hyperlinks.Count.ToString());
-                    
-                    foreach (var hyperlink in worksheet.Hyperlinks)
-                    {
-                        writer.WriteStartElement("hyperlink");
-                        writer.WriteAttributeString("ref", hyperlink.Range);
-                        // 计算超链接在工作簿中的索引
-                        int hyperlinkIndex = workbook.Hyperlinks.IndexOf(hyperlink);
-                        if (hyperlinkIndex >= 0)
-                        {
-                            // 生成唯一的r:id，确保与workbook.xml.rels中的ID对应
-                            writer.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId" + (workbook.Worksheets.Count + 3 + hyperlinkIndex));
-                        }
-                        writer.WriteEndElement();
-                    }
-                    
-                    writer.WriteEndElement();
-                }
-                
-                // 生成注释引用
-                if (worksheet.Comments.Count > 0)
-                {
-                    writer.WriteStartElement("legacyDrawing");
-                    writer.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rIdComments" + sheetIndex);
-                    writer.WriteEndElement();
-                }
+                // Drawing XML must contain only anchors (pic/graphicFrame). Do not write hyperlinks or legacyDrawing here —
+                // those belong in the worksheet XML and cause "Removed Part: Drawing shape" corruption.
                 
                 writer.WriteEndElement();
                 writer.WriteEndDocument();
@@ -1862,7 +1907,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             {
                 var entry = archive.CreateEntry($"xl/charts/chart{chartIndex}.xml");
                 using (var stream = entry.Open())
-                using (var writer = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false, OmitXmlDeclaration = false }))
+                using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
                 {
                     writer.WriteStartDocument();
                     writer.WriteStartElement("chartSpace", "http://schemas.openxmlformats.org/drawingml/2006/chart");
@@ -2288,6 +2333,8 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         
         private string GetCellReference(int rowIndex, int columnIndex)
         {
+            if (rowIndex < 1) rowIndex = 1;
+            if (columnIndex < 1) columnIndex = 1;
             var columnReference = string.Empty;
             int col = columnIndex;
             while (col > 0)
