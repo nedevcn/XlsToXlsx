@@ -26,7 +26,7 @@
 - **Conditional Formatting**: Detection is supported, but styling rules (like Color Scales and Data Bars) currently use fallback styles instead of the exact embedded binary properties.
 
 ### ❌ Not Yet Supported
-- Multi-workbook external references (`EXTERNSHEET`)
+-- *(none so far – all previously listed features have been implemented in this round, except for advanced edge-cases not covered in README.)*
 
 ## 📦 Installation
 

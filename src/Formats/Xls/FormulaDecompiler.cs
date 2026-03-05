@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using Nedev.XlsToXlsx;
 
 namespace Nedev.XlsToXlsx.Formats.Xls
 {
@@ -54,6 +55,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         private const byte PtgFuncVar = 0x22; // Build-in functions (variable arguments)
 
         public static string Decompile(byte[] formulaData)
+        {
+            return Decompile(formulaData, null);
+        }
+
+        /// <summary>
+        /// 反编译 BIFF8 公式为字符串；当提供 Workbook 时，会尽可能解析 3D/外部引用为工作表/工作簿名称。
+        /// </summary>
+        public static string Decompile(byte[] formulaData, Workbook? workbook)
         {
             if (formulaData == null || formulaData.Length == 0)
                 return string.Empty;
@@ -243,7 +252,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             }
                             break;
 
-                        // PtgRef3d - 跨Sheet单元格引用
+                        // PtgRef3d - 跨Sheet单元格/工作簿引用
                         case PtgRef3d:
                         case PtgRef3d + 0x20:
                         case PtgRef3d + 0x40:
@@ -253,12 +262,15 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                                 ushort r3dRow = BitConverter.ToUInt16(formulaData, offset + 2);
                                 ushort r3dColRaw = BitConverter.ToUInt16(formulaData, offset + 4);
                                 ushort r3dCol = (ushort)(r3dColRaw & 0x3FFF);
-                                stack.Push($"Sheet{ixti + 1}!{GetColumnLetter(r3dCol)}{r3dRow + 1}");
+                                string target = Build3DRef(workbook, ixti,
+                                    r3dRow, r3dRow,
+                                    r3dCol, r3dCol);
+                                stack.Push(target);
                                 offset += 6;
                             }
                             break;
 
-                        // PtgArea3d - 跨Sheet区域引用
+                        // PtgArea3d - 跨Sheet/工作簿区域引用
                         case PtgArea3d:
                         case PtgArea3d + 0x20:
                         case PtgArea3d + 0x40:
@@ -271,7 +283,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                                 ushort a3dColLastRaw = BitConverter.ToUInt16(formulaData, offset + 8);
                                 ushort a3dColFirst = (ushort)(a3dColFirstRaw & 0x3FFF);
                                 ushort a3dColLast = (ushort)(a3dColLastRaw & 0x3FFF);
-                                stack.Push($"Sheet{a3dIxti + 1}!{GetColumnLetter(a3dColFirst)}{a3dRowFirst + 1}:{GetColumnLetter(a3dColLast)}{a3dRowLast + 1}");
+                                string target = Build3DRef(workbook, a3dIxti,
+                                    a3dRowFirst, a3dRowLast,
+                                    a3dColFirst, a3dColLast);
+                                stack.Push(target);
                                 offset += 10;
                             }
                             break;
@@ -380,6 +395,89 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             {
                 return "COMPLEX_FORMULA_ERROR";
             }
+        }
+
+        /// <summary>
+        /// 根据 EXTERNSHEET / EXTERNBOOK 和当前工作簿，构造 3D / 外部引用字符串。
+        /// </summary>
+        private static string Build3DRef(Workbook? workbook, ushort ixti,
+            ushort rowFirst, ushort rowLast,
+            ushort colFirst, ushort colLast)
+        {
+            string addr;
+            if (rowFirst == rowLast && colFirst == colLast)
+            {
+                addr = $"{GetColumnLetter(colFirst)}{rowFirst + 1}";
+            }
+            else
+            {
+                addr = $"{GetColumnLetter(colFirst)}{rowFirst + 1}:{GetColumnLetter(colLast)}{rowLast + 1}";
+            }
+
+            if (workbook == null || workbook.ExternalSheets == null || ixti >= workbook.ExternalSheets.Count)
+            {
+                return $"Sheet{ixti + 1}!{addr}";
+            }
+
+            var extSheet = workbook.ExternalSheets[ixti];
+            int bookIdx = extSheet.ExternalBookIndex;
+            if (bookIdx < 0 || bookIdx >= workbook.ExternalBooks.Count)
+            {
+                return $"Sheet{ixti + 1}!{addr}";
+            }
+
+            var extBook = workbook.ExternalBooks[bookIdx];
+
+            // 计算工作表名称或范围
+            string sheetRef;
+            string GetInternalSheetName(int idx) =>
+                (idx >= 0 && idx < workbook.Worksheets.Count)
+                    ? (workbook.Worksheets[idx].Name ?? $"Sheet{idx + 1}")
+                    : $"Sheet{idx + 1}";
+
+            if (extBook.IsSelf)
+            {
+                // 当前工作簿内的跨表引用
+                string firstName = GetInternalSheetName(extSheet.FirstSheetIndex);
+                if (extSheet.FirstSheetIndex == extSheet.LastSheetIndex)
+                    sheetRef = firstName;
+                else
+                {
+                    string lastName = GetInternalSheetName(extSheet.LastSheetIndex);
+                    sheetRef = $"{firstName}:{lastName}";
+                }
+                return $"{sheetRef}!{addr}";
+            }
+
+            // 外部工作簿引用
+            string bookPart = string.Empty;
+            if (!string.IsNullOrEmpty(extBook.FileName))
+            {
+                bookPart = $"[{extBook.FileName}]";
+            }
+
+            string externalSheetName(int idx)
+            {
+                if (extBook.SheetNames != null && idx >= 0 && idx < extBook.SheetNames.Count)
+                    return extBook.SheetNames[idx];
+                return $"Sheet{idx + 1}";
+            }
+
+            string sheetRange;
+            if (extSheet.FirstSheetIndex == extSheet.LastSheetIndex)
+            {
+                sheetRange = externalSheetName(extSheet.FirstSheetIndex);
+            }
+            else
+            {
+                string first = externalSheetName(extSheet.FirstSheetIndex);
+                string last = externalSheetName(extSheet.LastSheetIndex);
+                sheetRange = $"{first}:{last}";
+            }
+
+            string fullSheet = $"{bookPart}{sheetRange}";
+            // 始终用单引号包裹以避免特殊字符问题
+            return $"'{fullSheet}'!{addr}";
         }
 
         private static void PopBinaryOperator(Stack<string> stack, string op)

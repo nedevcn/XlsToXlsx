@@ -1459,14 +1459,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             {
                 byte[] formula1Bytes = new byte[formula1Size];
                 Array.Copy(data, currentOffset, formula1Bytes, 0, formula1Size);
-                dataValidation.Formula1 = FormulaDecompiler.Decompile(formula1Bytes);
+                dataValidation.Formula1 = FormulaDecompiler.Decompile(formula1Bytes, _workbook);
                 currentOffset += formula1Size;
             }
             if (formula2Size > 0 && currentOffset + formula2Size <= data.Length)
             {
                 byte[] formula2Bytes = new byte[formula2Size];
                 Array.Copy(data, currentOffset, formula2Bytes, 0, formula2Size);
-                dataValidation.Formula2 = FormulaDecompiler.Decompile(formula2Bytes);
+                dataValidation.Formula2 = FormulaDecompiler.Decompile(formula2Bytes, _workbook);
                 currentOffset += formula2Size;
             }
             if (currentOffset + 8 <= data.Length)
@@ -1531,7 +1531,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     {
                         byte[] ptg1 = new byte[formula1Size];
                         Array.Copy(data, currentOffset, ptg1, 0, formula1Size);
-                        conditionalFormat.Formula = FormulaDecompiler.Decompile(ptg1);
+                        conditionalFormat.Formula = FormulaDecompiler.Decompile(ptg1, _workbook);
                         currentOffset += formula1Size;
                     }
                     if (formula2Size > 0 && currentOffset + formula2Size <= data.Length)
@@ -2285,7 +2285,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                                 {
                                     byte[] ptgs = new byte[formulaLength];
                                     Array.Copy(data, 22, ptgs, 0, formulaLength);
-                                    string formula = FormulaDecompiler.Decompile(ptgs);
+                                    string formula = FormulaDecompiler.Decompile(ptgs, _workbook);
                                     
                                     cell.Formula = formula;
                                     
@@ -2448,7 +2448,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             if (_sharedFormulaBaseRow > _sharedFormulaLastRow || _sharedFormulaBaseCol > _sharedFormulaLastCol) return;
             byte[] formulaTokens = new byte[data.Length - 8];
             Array.Copy(data, 8, formulaTokens, 0, formulaTokens.Length);
-            _sharedFormulaString = FormulaDecompiler.Decompile(formulaTokens);
+            _sharedFormulaString = FormulaDecompiler.Decompile(formulaTokens, _workbook);
         }
 
         /// <summary>若当前公式单元格落在最近一次 SHAREDFMLA 范围内且非首格，则用主公式按行列差调整引用后写入。</summary>
@@ -2619,7 +2619,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             byte[] formulaData = new byte[formulaLen];
             if (formulaLen > 0 && offset + formulaLen <= data.Length)
                 Array.Copy(data, offset, formulaData, 0, formulaLen);
-            string formula = FormulaDecompiler.Decompile(formulaData);
+            string formula = FormulaDecompiler.Decompile(formulaData, _workbook);
             workbook.DefinedNames.Add(new DefinedName
             {
                 Name = name,
@@ -2822,13 +2822,27 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 }
                 else
                 {
-                    // 外部文件路径
-                    int offset = 2;
-                    // SUPBOOK 的路径字符串前通常是一个字节的字符数
-                    byte pathLen = record.Data[offset];
+                    // 外部文件路径 + 工作表名称列表
+                    int offset = 4;
+                    if (offset >= record.Data.Length)
+                    {
+                        workbook.ExternalBooks.Add(extBook);
+                        return;
+                    }
+                    byte cchPath = record.Data[offset];
                     offset++;
-                    extBook.FileName = ReadBiffStringFromBytes(record.Data, ref offset, pathLen);
+                    extBook.FileName = ReadBiffStringFromBytes(record.Data, ref offset, cchPath);
                     Logger.Info($"找到外部工作簿引用: {extBook.FileName}");
+
+                    // 后续 count 个工作表名称
+                    for (int i = 0; i < count && offset < record.Data.Length; i++)
+                    {
+                        if (offset + 2 > record.Data.Length) break;
+                        byte cchSheet = record.Data[offset];
+                        offset++;
+                        string sheetName = ReadBiffStringFromBytes(record.Data, ref offset, cchSheet);
+                        extBook.SheetNames.Add(sheetName);
+                    }
                 }
                 
                 workbook.ExternalBooks.Add(extBook);
