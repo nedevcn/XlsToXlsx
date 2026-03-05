@@ -17,6 +17,7 @@
 - **Page Setup**: Keeps print margins, page orientation, paper size, and fit-to-page scaling.
 - **Pivot Tables**: Converts pivot table structure (fields, layout, data source range); output can be refreshed in Excel.
 - **AutoFilter**: Preserves filter range (from _FilterDatabase name) and filter column indices; writes `<autoFilter ref="...">` with `<filterColumn>` in XLSX.
+- **Worksheet / Workbook Protection**: Preserves sheet/workbook protection flags and 16‑bit password hashes; writes corresponding `sheetProtection` / `workbookProtection` so Excel still prompts for the original password.
 
 ### ⚠️ Partially Supported (WIP)
 - **Formulas**: A custom formula decompiler supports over 170+ standard Excel functions. Shared formulas (`SHAREDFMLA`) and array formulas (`ARRAY`) are supported.
@@ -25,7 +26,6 @@
 - **Conditional Formatting**: Detection is supported, but styling rules (like Color Scales and Data Bars) currently use fallback styles instead of the exact embedded binary properties.
 
 ### ❌ Not Yet Supported
-- Worksheet and Workbook Password Protection
 - Summary Information / Document Properties
 - Multi-workbook external references (`EXTERNSHEET`)
 

@@ -305,6 +305,30 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 case (ushort)BiffRecordType.EXTERNALNAME:
                     ParseExternalNameRecord(record, workbook);
                     break;
+                case (ushort)BiffRecordType.PROTECT:
+                    // 全局 PROTECT: 锁定工作簿结构
+                    if (record.Data != null && record.Data.Length >= 2)
+                    {
+                        ushort flags = BitConverter.ToUInt16(record.Data, 0);
+                        workbook.IsStructureProtected = (flags & 0x0001) != 0;
+                    }
+                    break;
+                case (ushort)BiffRecordType.WINDOWPROTECT:
+                    // 窗口保护
+                    if (record.Data != null && record.Data.Length >= 2)
+                    {
+                        ushort flags = BitConverter.ToUInt16(record.Data, 0);
+                        workbook.IsWindowsProtected = (flags & 0x0001) != 0;
+                    }
+                    break;
+                case (ushort)BiffRecordType.PASSWORD:
+                    // 全局 PASSWORD：工作簿结构密码
+                    if (record.Data != null && record.Data.Length >= 2)
+                    {
+                        ushort hash = BitConverter.ToUInt16(record.Data, 0);
+                        workbook.WorkbookPasswordHash = hash.ToString("X4", System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                    break;
             }
         }
 
@@ -536,6 +560,22 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             break;
                         case 0x0041: // PANE
                             ParsePaneRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.PROTECT:
+                            // 工作表保护标志
+                            if (record.Data != null && record.Data.Length >= 2)
+                            {
+                                ushort flags = BitConverter.ToUInt16(record.Data, 0);
+                                worksheet.IsProtected = (flags & 0x0001) != 0;
+                            }
+                            break;
+                        case (ushort)BiffRecordType.PASSWORD:
+                            // 工作表保护密码
+                            if (record.Data != null && record.Data.Length >= 2)
+                            {
+                                ushort hash = BitConverter.ToUInt16(record.Data, 0);
+                                worksheet.SheetPasswordHash = hash.ToString("X4", System.Globalization.CultureInfo.InvariantCulture);
+                            }
                             break;
                         case (ushort)BiffRecordType.DV:
                             ParseDVRecord(record, worksheet);

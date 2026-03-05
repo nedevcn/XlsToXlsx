@@ -140,6 +140,11 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         DIMENSION = 0x0200,      // 工作表范围
         WINDOW2 = 0x023E,        // 工作表窗口设置
         
+        // 保护与密码
+        PROTECT = 0x0012,        // 保护标志（工作表/工作簿）
+        PASSWORD = 0x0013,       // 保护密码哈希
+        WINDOWPROTECT = 0x0019,  // 窗口保护
+        
         // 超链接和注释
         HYPERLINK = 0x01B8,      // 超链接记录
         NOTE = 0x001C,           // 注释/批注记录 (BIFF8 NOTE)

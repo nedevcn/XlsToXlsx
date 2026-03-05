@@ -599,6 +599,18 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     }
                 }
                 writer.WriteEndElement(); // sheets
+                // 工作簿保护（结构/窗口 + 密码哈希）
+                if (workbook.IsStructureProtected || workbook.IsWindowsProtected || !string.IsNullOrEmpty(workbook.WorkbookPasswordHash))
+                {
+                    writer.WriteStartElement("workbookProtection");
+                    if (workbook.IsStructureProtected)
+                        writer.WriteAttributeString("lockStructure", "1");
+                    if (workbook.IsWindowsProtected)
+                        writer.WriteAttributeString("lockWindows", "1");
+                    if (!string.IsNullOrEmpty(workbook.WorkbookPasswordHash))
+                        writer.WriteAttributeString("password", workbook.WorkbookPasswordHash);
+                    writer.WriteEndElement();
+                }
 
                 if (workbook.DefinedNames != null && workbook.DefinedNames.Count > 0)
                 {
@@ -799,7 +811,20 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 
                 writer.WriteEndElement(); // sheetView
                 writer.WriteEndElement(); // sheetViews
-                
+                // 工作表保护
+                if (worksheet.IsProtected || !string.IsNullOrEmpty(worksheet.SheetPasswordHash))
+                {
+                    writer.WriteStartElement("sheetProtection");
+                    if (worksheet.IsProtected)
+                        writer.WriteAttributeString("sheet", "1");
+                    if (!string.IsNullOrEmpty(worksheet.SheetPasswordHash))
+                        writer.WriteAttributeString("password", worksheet.SheetPasswordHash);
+                    // 常见默认：保护对象和方案
+                    writer.WriteAttributeString("objects", "1");
+                    writer.WriteAttributeString("scenarios", "1");
+                    writer.WriteEndElement();
+                }
+
                 // sheetFormatPr（默认行高列宽）
                 writer.WriteStartElement("sheetFormatPr");
                 if (worksheet.DefaultRowHeight.HasValue)

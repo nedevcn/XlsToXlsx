@@ -83,6 +83,18 @@ namespace Nedev.XlsToXlsx
         /// 外部工作表引用索引表
         /// </summary>
         public List<ExternalSheet> ExternalSheets { get; set; } = new List<ExternalSheet>();
+        /// <summary>
+        /// 是否锁定工作簿结构（来自全局 PROTECT / WINDOWPROTECT）
+        /// </summary>
+        public bool IsStructureProtected { get; set; }
+        /// <summary>
+        /// 是否锁定窗口布局
+        /// </summary>
+        public bool IsWindowsProtected { get; set; }
+        /// <summary>
+        /// 工作簿保护密码哈希（BIFF PASSWORD 16 位，写入 workbookProtection password）
+        /// </summary>
+        public string? WorkbookPasswordHash { get; set; }
     }
 
     /// <summary>
@@ -182,6 +194,14 @@ namespace Nedev.XlsToXlsx
         /// 自动筛选列索引（相对范围的 0-based 列），与 AUTOFILTER 的 iEntry 对应
         /// </summary>
         public List<int> AutoFilterColumnIndices { get; set; } = new List<int>();
+        /// <summary>
+        /// 是否保护工作表（BIFF PROTECT）
+        /// </summary>
+        public bool IsProtected { get; set; }
+        /// <summary>
+        /// 工作表保护密码哈希（BIFF PASSWORD 16 位）
+        /// </summary>
+        public string? SheetPasswordHash { get; set; }
     }
 
     /// <summary>
