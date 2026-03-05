@@ -100,7 +100,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         FONT = 0x0031,           // 字体记录
         XF = 0x00E0,             // 扩展格式记录
         PALETTE = 0x0092,        // 调色板记录
-        BORDER = 0x00B2,         // 边框记录
+        BORDER = 0x00B2,         // 全局边框记录（仅在工作簿全局流中出现）
         FILL = 0x00F5,           // 填充记录
         
         // 图表记录 (BIFF8 Chart Substream)
@@ -148,7 +148,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         // 数据透视表记录
         SXVIEW = 0x00B0,         // 数据透视表视图属性
         SXVD = 0x00B1,           // 数据透视表字段属性
-        SXVI = 0x00B2,           // 数据透视表项
+        SXVI = 0x00B2,           // 数据透视表项（与 BORDER 同值，按所在流区分：全局=BORDER，透视表=SXVI）
         SXDX = 0x00C6,           // 数据透视表数据字段
         SXFIELD = 0x00CA,        // 数据透视表字段信息
         SXPI = 0x00B7,           // 数据透视表页项

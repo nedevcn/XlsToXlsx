@@ -580,7 +580,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     {
                         if (string.IsNullOrEmpty(dn?.Name)) continue;
                         writer.WriteStartElement("definedName");
-                        writer.WriteAttributeString("name", dn.Name!);
+                        writer.WriteAttributeString("name", GetOoxmlBuiltInName(dn.Name!));
                         if (dn.LocalSheetId.HasValue && sheetCountForNames > 0)
                         {
                             int localId = Math.Clamp(dn.LocalSheetId.Value, 0, sheetCountForNames - 1);
@@ -686,6 +686,17 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 
                 int styleCount = (workbook.XfList != null && workbook.XfList.Count > 0) ? workbook.XfList.Count : 1;
                 int maxStyleId = Math.Max(0, styleCount - 1);
+                
+                // sheetPr（含 pageSetUpPr fitToPage，使 fitToWidth/fitToHeight 生效）
+                var ps = worksheet.PageSettings;
+                if (ps != null && (ps.FitToWidth > 0 || ps.FitToHeight > 0))
+                {
+                    writer.WriteStartElement("sheetPr");
+                    writer.WriteStartElement("pageSetUpPr");
+                    writer.WriteAttributeString("fitToPage", "1");
+                    writer.WriteEndElement();
+                    writer.WriteEndElement(); // sheetPr
+                }
                 
                 // dimension（工作表范围；Excel 最大行 1048576，最大列 16384）
                 writer.WriteStartElement("dimension");
@@ -804,8 +815,14 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
 
                             bool isDateCell = cell.Value is DateTime;
                             
+                            // 数组公式：t="array" 且 ref 为范围
+                            if (cell.IsArrayFormula && !string.IsNullOrEmpty(cell.ArrayRef))
+                            {
+                                writer.WriteAttributeString("t", "array");
+                                writer.WriteAttributeString("ref", cell.ArrayRef);
+                            }
                             // t 属性：日期单元格使用数值序列（不使用 t=\"d\"），避免 Sem_CellValue 错误
-                            if (!string.IsNullOrEmpty(cell.DataType) && !isDateCell)
+                            else if (!string.IsNullOrEmpty(cell.DataType) && !isDateCell)
                             {
                                 writer.WriteAttributeString("t", cell.DataType);
                             }
@@ -821,14 +838,13 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             if (styleToUse.HasValue)
                                 writer.WriteAttributeString("s", Math.Clamp(styleToUse.Value, 0, maxStyleId).ToString());
                             
-                            // 处理公式
-                            if (cell.DataType == "f")
+                            // 处理公式（含数组公式）
+                            if (cell.DataType == "f" || cell.IsArrayFormula)
                             {
                                 writer.WriteStartElement("f");
                                 writer.WriteString(cell.Formula ?? "");
                                 writer.WriteEndElement();
                                 writer.WriteStartElement("v");
-                                // 写入公式结果
                                 if (cell.Value != null)
                                 {
                                     writer.WriteString(cell.Value.ToString() ?? "");
@@ -1081,7 +1097,8 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 }
                 
                 // P3: pageMargins (页面边距) - 必须在 sheetData 之后
-                var ps = worksheet.PageSettings;
+                if (ps != null)
+                {
                 writer.WriteStartElement("pageMargins");
                 writer.WriteAttributeString("left", ps.LeftMargin.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 writer.WriteAttributeString("right", ps.RightMargin.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -1114,6 +1131,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         writer.WriteElementString("oddFooter", ps.Footer);
                     }
                     writer.WriteEndElement(); // headerFooter
+                }
                 }
 
                 // 生成 drawing 引用 (仅当有图片数据或图表时；必须在 pageSetup/headerFooter 之后)
@@ -2451,6 +2469,22 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 Logger.Error($"创建图表XML时发生错误: {ex.Message}", ex);
                 throw new ChartProcessingException($"创建图表XML时发生错误: {ex.Message}", ex);
             }
+        }
+        
+        /// <summary>将 BIFF 内置名称映射为 OOXML 保留名称，便于 Excel 识别打印区域等。</summary>
+        private static string GetOoxmlBuiltInName(string name)
+        {
+            return name switch
+            {
+                "Print_Area" => "_xlnm.Print_Area",
+                "Print_Titles" => "_xlnm.Print_Titles",
+                "Consolidate_Area" => "_xlnm.Consolidate_Area",
+                "Database" => "_xlnm.Database",
+                "Criteria" => "_xlnm.Criteria",
+                "FilterDatabase" => "_xlnm._FilterDatabase",
+                "Sheet_Title" => "_xlnm.Sheet_Title",
+                _ => name
+            };
         }
         
         private string GetCellReference(int rowIndex, int columnIndex)

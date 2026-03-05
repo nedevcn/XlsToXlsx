@@ -765,6 +765,14 @@ namespace Nedev.XlsToXlsx
         /// 富文本内容
         /// </summary>
         public List<RichTextRun>? RichText { get; set; }
+        /// <summary>
+        /// 是否为数组公式
+        /// </summary>
+        public bool IsArrayFormula { get; set; }
+        /// <summary>
+        /// 数组公式范围（如 "A1:C3"），仅当 IsArrayFormula 为 true 时有效
+        /// </summary>
+        public string? ArrayRef { get; set; }
     }
 
     /// <summary>

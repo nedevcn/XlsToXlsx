@@ -2,6 +2,7 @@ using System.IO;
 using System.Collections.Generic;
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Nedev.XlsToXlsx;
 using Nedev.XlsToXlsx.Exceptions;
 
@@ -70,6 +71,13 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         // 数据透视表解析状态
         private PivotTable? _currentPivotTable;
+
+        // 共享公式：SHAREDFMLA 后的主公式及范围，用于后续 FORMULA 单元格按行列差调整引用
+        private string? _sharedFormulaString;
+        private int _sharedFormulaBaseRow;
+        private int _sharedFormulaBaseCol;
+        private int _sharedFormulaLastRow;
+        private int _sharedFormulaLastCol;
 
         public XlsParser(Stream stream)
         {
@@ -265,6 +273,12 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     break;
                 case (ushort)BiffRecordType.PALETTE:
                     ParsePaletteRecordGlobal(record);
+                    break;
+                case (ushort)BiffRecordType.BORDER:
+                    ParseBorderRecord(record, workbook);
+                    break;
+                case (ushort)BiffRecordType.FILL:
+                    ParseFillRecord(record, workbook);
                     break;
                 case (ushort)BiffRecordType.NAME:
                     ParseNameRecord(record, workbook);
@@ -467,6 +481,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             var formulaCell = ParseCellRecord(record);
                             if (formulaCell.ColumnIndex >= 1 && formulaCell.ColumnIndex <= 16384)
                             {
+                                ApplySharedFormulaToCell(formulaCell);
                                 var targetRow2 = GetOrCreateRow(worksheet, ref currentRow, formulaCell.RowIndex);
                                 targetRow2.Cells.Add(formulaCell);
                                 if (formulaCell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = formulaCell.ColumnIndex;
@@ -474,9 +489,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             }
                             break;
                         case (ushort)BiffRecordType.ARRAY:
+                            ParseArrayRecord(record, ref currentRow);
+                            break;
                         case (ushort)BiffRecordType.SHAREDFMLA:
-                            // 数组公式和共享公式紧跟着 FORMULA。其计算值已经在 FORMULA 记录中提取并缓存，
-                            // 此处安全忽略其具体的公式解析，确保数据不丢失。
+                            ParseSharedFmlaRecord(record);
                             break;
                         case (ushort)BiffRecordType.STRING:
                             if (currentRow != null && currentRow.Cells.Count > 0)
@@ -982,14 +998,22 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             var escherRecords = Escher.EscherParser.ParseStream(drawingData);
                             // 在记录中查找 ClientAnchor (0xF010)
                             var anchor = FindClientAnchor(escherRecords);
-                            if (anchor != null && anchor.Data.Length >= 16)
+                            if (anchor != null && anchor.Data != null && anchor.Data.Length >= 16)
                             {
-                                // ClientAnchor 的数据格式解析。其实是行列+偏移，这里用简化数据表示
-                                // 实际图表左上角/右下角为行列，为了与现有模型兼容，暂时记录索引
-                                int left = BitConverter.ToUInt16(anchor.Data, 6); // dxL
-                                int top = BitConverter.ToUInt16(anchor.Data, 10); // dyT
-                                int width = 500; // placeholder
-                                int height = 300; // placeholder
+                                // ClientAnchor 布局 (POI/MS-ODRAW): col1(2), dxL(2), row1(2), dyT(2), col2(2), dxR(2), row2(2), dyB(2)
+                                ushort col1 = BitConverter.ToUInt16(anchor.Data, 0);
+                                ushort dxL = BitConverter.ToUInt16(anchor.Data, 2);
+                                ushort row1 = BitConverter.ToUInt16(anchor.Data, 4);
+                                ushort dyT = BitConverter.ToUInt16(anchor.Data, 6);
+                                ushort col2 = BitConverter.ToUInt16(anchor.Data, 8);
+                                ushort dxR = BitConverter.ToUInt16(anchor.Data, 10);
+                                ushort row2 = BitConverter.ToUInt16(anchor.Data, 12);
+                                ushort dyB = BitConverter.ToUInt16(anchor.Data, 14);
+                                int left = dxL;
+                                int top = dyT;
+                                // 单元格宽 1024 单位，高 256 单位
+                                int width = Math.Max(1, (col2 - col1) * 1024 + (dxR - dxL));
+                                int height = Math.Max(1, (row2 - row1) * 256 + (dyB - dyT));
                                 _pendingChartAnchors.Add((left, top, width, height));
                             }
                         }
@@ -1775,6 +1799,48 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             }
         }
 
+        /// <summary>解析 BIFF8 BORDER (0x00B2) 全局边框记录，与 XF 内嵌边框布局一致：8 字节 border1(4)+border2(4)。</summary>
+        private void ParseBorderRecord(BiffRecord record, Workbook workbook)
+        {
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 8) return;
+            uint border1 = BitConverter.ToUInt32(data, 0);
+            uint border2 = BitConverter.ToUInt32(data, 4);
+            var border = new Border
+            {
+                Left = GetBorderLineStyle((byte)(border1 & 0x0F)),
+                Right = GetBorderLineStyle((byte)((border1 >> 4) & 0x0F)),
+                Top = GetBorderLineStyle((byte)((border1 >> 8) & 0x0F)),
+                Bottom = GetBorderLineStyle((byte)((border1 >> 12) & 0x0F)),
+                LeftColor = GetColorFromPalette((int)((border1 >> 16) & 0x7F)),
+                RightColor = GetColorFromPalette((int)((border1 >> 23) & 0x7F)),
+                TopColor = GetColorFromPalette((int)(border2 & 0x7F)),
+                BottomColor = GetColorFromPalette((int)((border2 >> 7) & 0x7F)),
+                DiagonalColor = GetColorFromPalette((int)((border2 >> 14) & 0x7F)),
+                Diagonal = GetBorderLineStyle((byte)((border2 >> 21) & 0x0F))
+            };
+            workbook.Borders.Add(border);
+        }
+
+        /// <summary>解析 BIFF8 FILL (0x00F5) 全局填充记录，与 XF 内嵌填充一致：低6位=pattern，次7位=icvFore，下一字节=icvBack。</summary>
+        private void ParseFillRecord(BiffRecord record, Workbook workbook)
+        {
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 4) return;
+            ushort fillData = BitConverter.ToUInt16(data, 0);
+            byte pattern = (byte)(fillData & 0x3F);
+            int icvFore = (fillData >> 6) & 0x7F;
+            int icvBack = data.Length > 2 ? (data[2] & 0x7F) : 65;
+            if (pattern == 0) return;
+            var fill = new Fill
+            {
+                PatternType = GetPatternType(pattern),
+                ForegroundColor = GetColorFromPalette(icvFore),
+                BackgroundColor = GetColorFromPalette(icvBack)
+            };
+            workbook.Fills.Add(fill);
+        }
+
         private Row ParseRowRecord(BiffRecord record)
         {
             var row = new Row();
@@ -2093,6 +2159,91 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             }
             
             return excelBaseDate.AddDays(excelDate);
+        }
+
+        /// <summary>解析 BIFF8 ARRAY (0x0221)：紧跟 FORMULA，前 8 字节为 firstRow(2), lastRow(2), firstCol(2), lastCol(2)，用于标记上一单元格为数组公式并设置范围。</summary>
+        private void ParseArrayRecord(BiffRecord record, ref Row? currentRow)
+        {
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 8) return;
+            if (currentRow == null || currentRow.Cells.Count == 0) return;
+            ushort firstRow = BitConverter.ToUInt16(data, 0);
+            ushort lastRow = BitConverter.ToUInt16(data, 2);
+            ushort firstCol = BitConverter.ToUInt16(data, 4);
+            ushort lastCol = BitConverter.ToUInt16(data, 6);
+            if (firstRow > lastRow || firstCol > lastCol) return;
+            var cell = currentRow.Cells[currentRow.Cells.Count - 1];
+            cell.IsArrayFormula = true;
+            cell.ArrayRef = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
+        }
+
+        /// <summary>解析 BIFF8 SHAREDFMLA (0x04BC)：前 8 字节为 firstRow, firstCol, lastRow, lastCol，随后为公式 token 数组，用于后续 FORMULA 按行列差展开。</summary>
+        private void ParseSharedFmlaRecord(BiffRecord record)
+        {
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 10) return;
+            _sharedFormulaBaseRow = BitConverter.ToUInt16(data, 0);
+            _sharedFormulaBaseCol = BitConverter.ToUInt16(data, 2);
+            _sharedFormulaLastRow = BitConverter.ToUInt16(data, 4);
+            _sharedFormulaLastCol = BitConverter.ToUInt16(data, 6);
+            if (_sharedFormulaBaseRow > _sharedFormulaLastRow || _sharedFormulaBaseCol > _sharedFormulaLastCol) return;
+            byte[] formulaTokens = new byte[data.Length - 8];
+            Array.Copy(data, 8, formulaTokens, 0, formulaTokens.Length);
+            _sharedFormulaString = FormulaDecompiler.Decompile(formulaTokens);
+        }
+
+        /// <summary>若当前公式单元格落在最近一次 SHAREDFMLA 范围内且非首格，则用主公式按行列差调整引用后写入。</summary>
+        private void ApplySharedFormulaToCell(Cell cell)
+        {
+            if (string.IsNullOrEmpty(_sharedFormulaString)) return;
+            int r0 = cell.RowIndex - 1;
+            int c0 = cell.ColumnIndex - 1;
+            if (r0 < _sharedFormulaBaseRow || r0 > _sharedFormulaLastRow || c0 < _sharedFormulaBaseCol || c0 > _sharedFormulaLastCol) return;
+            if (r0 == _sharedFormulaBaseRow && c0 == _sharedFormulaBaseCol) return;
+            int dr = r0 - _sharedFormulaBaseRow;
+            int dc = c0 - _sharedFormulaBaseCol;
+            cell.Formula = AdjustFormulaRefs(_sharedFormulaString, dr, dc);
+            if (cell.DataType != "f") cell.DataType = "f";
+        }
+
+        /// <summary>将公式中的相对引用按 (dr, dc) 平移。仅处理简单 A1 引用与 A1:B2 范围，不含 $ 的视为相对。</summary>
+        private static string AdjustFormulaRefs(string formula, int dr, int dc)
+        {
+            if (string.IsNullOrEmpty(formula) || (dr == 0 && dc == 0)) return formula;
+            return Regex.Replace(formula, @"(\$?)([A-Za-z]+)(\$?)(\d+)", m =>
+            {
+                bool absCol = m.Groups[1].Value.Length > 0;
+                bool absRow = m.Groups[3].Value.Length > 0;
+                string colLetters = m.Groups[2].Value;
+                int row = int.Parse(m.Groups[4].Value);
+                int col0 = ColumnLettersToIndex(colLetters);
+                int newCol = absCol ? col0 : (col0 + dc);
+                int newRow = absRow ? row : (row + dr);
+                if (newCol < 0 || newRow < 1) return m.Value;
+                return (absCol ? "$" : "") + GetColumnLetterStatic(newCol) + (absRow ? "$" : "") + newRow;
+            });
+        }
+
+        private static int ColumnLettersToIndex(string letters)
+        {
+            int index = 0;
+            foreach (char c in letters.ToUpperInvariant())
+                index = index * 26 + (c - 'A' + 1);
+            return index - 1;
+        }
+
+        private static string GetColumnLetterStatic(int columnIndex)
+        {
+            if (columnIndex < 0) return "A";
+            string s = "";
+            int col = columnIndex + 1;
+            while (col > 0)
+            {
+                int mod = (col - 1) % 26;
+                s = (char)('A' + mod) + s;
+                col = (col - mod) / 26;
+            }
+            return s;
         }
 
         /// <summary>解析 BIFF8 DIMENSION (0x0200)：firstRow(4), lastRow(4), firstCol(2), lastCol(2), reserved(2)。行列均为 0-based，用于初始化或扩展 MaxRow/MaxColumn。</summary>
