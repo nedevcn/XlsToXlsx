@@ -49,6 +49,47 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         }
 
         /// <summary>
+        /// 规范化 sqref / Range 表达式，修复类似 "C65536:65536" 这种缺少列字母的旧 XLS 写法。
+        /// </summary>
+        private static string SanitizeSqref(string? range)
+        {
+            if (string.IsNullOrWhiteSpace(range))
+                return range ?? string.Empty;
+
+            var parts = range.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < parts.Length; i++)
+            {
+                var part = parts[i];
+                int colonIndex = part.IndexOf(':');
+                if (colonIndex <= 0 || colonIndex == part.Length - 1)
+                    continue;
+
+                string start = part.Substring(0, colonIndex);
+                string end = part.Substring(colonIndex + 1);
+
+                // 如果 end 已经包含列字母，则保持不变
+                bool endHasLetter = end.Any(ch => (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'));
+                if (endHasLetter)
+                    continue;
+
+                // 从 start 提取列字母前缀
+                int idx = 0;
+                while (idx < start.Length && ((start[idx] >= 'A' && start[idx] <= 'Z') || (start[idx] >= 'a' && start[idx] <= 'z')))
+                {
+                    idx++;
+                }
+                if (idx == 0)
+                    continue;
+
+                string col = start.Substring(0, idx);
+                string fixedPart = $"{start}:{col}{end}";
+                parts[i] = fixedPart;
+            }
+
+            return string.Join(" ", parts);
+        }
+
+        /// <summary>
         /// True when the sheet has at least one picture with data or one chart. We do not create a drawing part for
         /// EmbeddedObjects-only or pictures-without-data, to avoid empty/invalid drawing parts and rId/media mismatches.
         /// </summary>
@@ -906,7 +947,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         if (!string.IsNullOrEmpty(cf.Range))
                         {
                             writer.WriteStartElement("conditionalFormatting");
-                            writer.WriteAttributeString("sqref", cf.Range);
+                            writer.WriteAttributeString("sqref", SanitizeSqref(cf.Range));
                             
                             writer.WriteStartElement("cfRule");
                             writer.WriteAttributeString("priority", cfPriority.ToString());
@@ -989,7 +1030,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         writer.WriteStartElement("dataValidation");
                         if (!string.IsNullOrEmpty(dv.Range))
                         {
-                            writer.WriteAttributeString("sqref", dv.Range);
+                            writer.WriteAttributeString("sqref", SanitizeSqref(dv.Range));
                         }
                         if (!string.IsNullOrEmpty(dv.Type))
                         {
