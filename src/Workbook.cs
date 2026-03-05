@@ -506,6 +506,10 @@ namespace Nedev.XlsToXlsx
         /// </summary>
         public string? ChartType { get; set; }
         /// <summary>
+        /// 是否为3D图表（由 CHART3D 记录决定）
+        /// </summary>
+        public bool Is3D { get; set; }
+        /// <summary>
         /// 数据系列列表
         /// </summary>
         public List<Series> Series { get; set; } = new List<Series>();

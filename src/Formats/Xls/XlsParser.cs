@@ -2733,6 +2733,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
             switch (record.Id)
             {
+                case (ushort)BiffRecordType.CHART3D:
+                    // BIFF8 CHART3D (0x103A) - 标记为3D图表；详细参数（旋转、透视等）暂不解析
+                    chart.Is3D = true;
+                    break;
                 case 0x1017: // Bar
                     chart.ChartType = "barChart";
                     break;

@@ -2436,17 +2436,20 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             }
         }
 
-        private string GetChartElementType(string chartType)
+        private string GetChartElementType(Chart chart)
         {
+            string chartType = chart.ChartType ?? "barChart";
+            bool is3D = chart.Is3D || string.Equals(chartType, "surfaceChart", StringComparison.OrdinalIgnoreCase);
+
             // 映射图表类型到OpenXML元素名称
             switch (chartType)
             {
-                case "barChart": return "barChart";
-                case "colChart": return "colChart";
-                case "lineChart": return "lineChart";
-                case "pieChart": return "pieChart";
+                case "barChart": return is3D ? "bar3DChart" : "barChart";
+                case "colChart": return is3D ? "bar3DChart" : "colChart";
+                case "lineChart": return is3D ? "line3DChart" : "lineChart";
+                case "pieChart": return is3D ? "pie3DChart" : "pieChart";
                 case "scatterChart": return "scatterChart";
-                case "areaChart": return "areaChart";
+                case "areaChart": return is3D ? "area3DChart" : "areaChart";
                 case "doughnutChart": return "doughnutChart";
                 case "radarChart": return "radarChart";
                 case "surfaceChart": return "surfaceChart";
@@ -2498,7 +2501,23 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         writer.WriteEndElement();
                     }
                     
-                    // OOXML chart structure: chart > (title?) > plotArea > (layout, chartType, catAx, valAx) > legend?
+                    // OOXML chart structure: chart > (title?) > view3D? > plotArea > (layout, chartType, catAx, valAx) > legend?
+                    
+                    // 3D 视图（如果由 CHART3D 标记为 3D）
+                    if (chart.Is3D)
+                    {
+                        writer.WriteStartElement("view3D");
+                        writer.WriteStartElement("rotX");
+                        writer.WriteAttributeString("val", "20");
+                        writer.WriteEndElement();
+                        writer.WriteStartElement("rotY");
+                        writer.WriteAttributeString("val", "20");
+                        writer.WriteEndElement();
+                        writer.WriteStartElement("perspective");
+                        writer.WriteAttributeString("val", "30");
+                        writer.WriteEndElement();
+                        writer.WriteEndElement();
+                    }
                     
                     // plotArea 包含图表类型和坐标轴
                     writer.WriteStartElement("plotArea");
@@ -2506,7 +2525,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement(); // layout
                     
                     // 写入图表类型
-                    string chartElementType = GetChartElementType(chart.ChartType);
+                    string chartElementType = GetChartElementType(chart);
                     writer.WriteStartElement(chartElementType);
                     
                     // 为不同类型的图表添加适当的元素
