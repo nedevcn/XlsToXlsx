@@ -18,6 +18,8 @@
 - **Pivot Tables**: Converts pivot table structure (fields, layout, data source range); output can be refreshed in Excel.
 - **AutoFilter**: Preserves filter range (from _FilterDatabase name) and filter column indices; writes `<autoFilter ref="...">` with `<filterColumn>` in XLSX.
 - **Worksheet / Workbook Protection**: Preserves sheet/workbook protection flags and 16‑bit password hashes; writes corresponding `sheetProtection` / `workbookProtection` so Excel still prompts for the original password.
+- **Document Properties**: Reads OLE SummaryInformation/DocumentSummaryInformation and writes matching `docProps/core.xml` and `docProps/app.xml` (title, subject, author, company, timestamps, etc).
+- **External Workbook Links**: Converts EXTERNSHEET/EXTERNBOOK into OOXML `externalLinks` parts and updates 3D formula refs to `[n]Sheet!A1` form.
 
 ### ⚠️ Partially Supported (WIP)
 - **Formulas**: A custom formula decompiler supports over 170+ standard Excel functions. Shared formulas (`SHAREDFMLA`) and array formulas (`ARRAY`) are supported.
@@ -26,7 +28,7 @@
 - **Conditional Formatting**: Detection is supported, but styling rules (like Color Scales and Data Bars) currently use fallback styles instead of the exact embedded binary properties.
 
 ### ❌ Not Yet Supported
--- *(none so far – all previously listed features have been implemented in this round, except for advanced edge-cases not covered in README.)*
+- *(none so far – all previously listed features have been implemented in this round, except for advanced edge-cases not covered in README.)*
 
 ## 📦 Installation
 

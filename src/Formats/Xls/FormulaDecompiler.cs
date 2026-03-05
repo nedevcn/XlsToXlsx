@@ -450,11 +450,16 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             }
 
             // 外部工作簿引用
-            string bookPart = string.Empty;
-            if (!string.IsNullOrEmpty(extBook.FileName))
+            // OOXML 中外部链接通常用 [n] 引用（n 为 externalLink 的 1-based 序号）
+            int externalLinkId = 0;
+            for (int i = 0; i < bookIdx && i < workbook.ExternalBooks.Count; i++)
             {
-                bookPart = $"[{extBook.FileName}]";
+                var b = workbook.ExternalBooks[i];
+                if (b == null) continue;
+                if (!b.IsSelf && !b.IsAddIn) externalLinkId++;
             }
+            if (externalLinkId <= 0) externalLinkId = 1;
+            string bookPart = $"[{externalLinkId}]";
 
             string externalSheetName(int idx)
             {

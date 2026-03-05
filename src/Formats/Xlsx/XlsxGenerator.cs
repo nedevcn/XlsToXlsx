@@ -212,6 +212,9 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         Logger.Info("所有工作表创建完成");
                     }
                     
+                    // 创建 externalLinks（外部工作簿引用缓存）
+                    CreateExternalLinks(archive, workbook);
+                    
                     // 数据透视表：pivotCache 与 pivotTable 部件
                     CreatePivotParts(archive, workbook);
                     // 创建图片和嵌入对象
@@ -416,6 +419,16 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteAttributeString("ContentType", "application/vnd.ms-office.vbaProject");
                     writer.WriteEndElement();
                 }
+                
+                // externalLinks 内容类型
+                int externalLinkCount = workbook.ExternalBooks?.Count(b => b != null && !b.IsSelf && !b.IsAddIn) ?? 0;
+                for (int i = 0; i < externalLinkCount; i++)
+                {
+                    writer.WriteStartElement("Override");
+                    writer.WriteAttributeString("PartName", $"/xl/externalLinks/externalLink{i + 1}.xml");
+                    writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml");
+                    writer.WriteEndElement();
+                }
                 // 数据透视表缓存与透视表部件
                 int totalPivot = GetTotalPivotTableCount(workbook);
                 for (int i = 0; i < totalPivot; i++)
@@ -596,6 +609,67 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             return n;
         }
 
+        private void CreateExternalLinks(ZipArchive archive, Workbook workbook)
+        {
+            if (workbook.ExternalBooks == null || workbook.ExternalBooks.Count == 0) return;
+            var externalBooks = workbook.ExternalBooks.Where(b => b != null && !b.IsSelf && !b.IsAddIn).ToList();
+            if (externalBooks.Count == 0) return;
+
+            for (int i = 0; i < externalBooks.Count; i++)
+            {
+                var extBook = externalBooks[i];
+                int linkIndex = i + 1;
+
+                // externalLinkN.xml
+                var entry = archive.CreateEntry($"xl/externalLinks/externalLink{linkIndex}.xml");
+                using (var stream = entry.Open())
+                using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
+                {
+                    writer.WriteStartDocument();
+                    writer.WriteStartElement("externalLink", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+                    writer.WriteAttributeString("xmlns", "r", null, "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
+
+                    writer.WriteStartElement("externalBook");
+                    writer.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId1");
+
+                    // sheetNames
+                    if (extBook.SheetNames != null && extBook.SheetNames.Count > 0)
+                    {
+                        writer.WriteStartElement("sheetNames");
+                        foreach (var name in extBook.SheetNames)
+                        {
+                            writer.WriteStartElement("sheetName");
+                            writer.WriteAttributeString("val", name ?? string.Empty);
+                            writer.WriteEndElement();
+                        }
+                        writer.WriteEndElement();
+                    }
+
+                    writer.WriteEndElement(); // externalBook
+                    writer.WriteEndElement(); // externalLink
+                    writer.WriteEndDocument();
+                }
+
+                // xl/externalLinks/_rels/externalLinkN.xml.rels
+                var relEntry = archive.CreateEntry($"xl/externalLinks/_rels/externalLink{linkIndex}.xml.rels");
+                using (var stream = relEntry.Open())
+                using (var writer = XmlWriter.Create(stream, Utf8NoBomXmlSettings))
+                {
+                    writer.WriteStartDocument();
+                    writer.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
+                    writer.WriteStartElement("Relationship");
+                    writer.WriteAttributeString("Id", "rId1");
+                    writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath");
+                    string target = !string.IsNullOrEmpty(extBook.FileName) ? extBook.FileName! : string.Empty;
+                    writer.WriteAttributeString("Target", target);
+                    writer.WriteAttributeString("TargetMode", "External");
+                    writer.WriteEndElement();
+                    writer.WriteEndElement();
+                    writer.WriteEndDocument();
+                }
+            }
+        }
+
         private void CreateWorkbookXml(ZipArchive archive, Workbook workbook)
         {
             var entry = archive.CreateEntry("xl/workbook.xml");
@@ -730,22 +804,37 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 writer.WriteAttributeString("Target", "sharedStrings.xml");
                 writer.WriteEndElement();
                 
+                int nextRelId = worksheetCount + 3;
+                
+                // Pivot cache relationships
                 int totalPivotTables = GetTotalPivotTableCount(workbook);
-                int pivotRelIdBase = worksheetCount + 3;
                 for (int i = 0; i < totalPivotTables; i++)
                 {
                     writer.WriteStartElement("Relationship");
-                    writer.WriteAttributeString("Id", "rId" + (pivotRelIdBase + i));
+                    writer.WriteAttributeString("Id", "rId" + nextRelId);
                     writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition");
                     writer.WriteAttributeString("Target", "pivotCache/pivotCacheDefinition" + (i + 1) + ".xml");
                     writer.WriteEndElement();
+                    nextRelId++;
                 }
                 
-                // VBA项目关系（ID 在 pivot 之后）
+                // externalLinks relationships
+                int externalLinkCount = workbook.ExternalBooks?.Count(b => b != null && !b.IsSelf && !b.IsAddIn) ?? 0;
+                for (int i = 0; i < externalLinkCount; i++)
+                {
+                    writer.WriteStartElement("Relationship");
+                    writer.WriteAttributeString("Id", "rId" + nextRelId);
+                    writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink");
+                    writer.WriteAttributeString("Target", "externalLinks/externalLink" + (i + 1) + ".xml");
+                    writer.WriteEndElement();
+                    nextRelId++;
+                }
+                
+                // VBA项目关系（ID 在 pivot/externalLinks 之后）
                 if (workbook.VbaProject != null)
                 {
                     writer.WriteStartElement("Relationship");
-                    writer.WriteAttributeString("Id", "rId" + (pivotRelIdBase + totalPivotTables));
+                    writer.WriteAttributeString("Id", "rId" + nextRelId);
                     writer.WriteAttributeString("Type", "http://schemas.microsoft.com/office/2006/relationships/vbaProject");
                     writer.WriteAttributeString("Target", "vbaProject.bin");
                     writer.WriteEndElement();
