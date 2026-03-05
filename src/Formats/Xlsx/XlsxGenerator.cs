@@ -485,16 +485,38 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 writer.WriteAttributeString("xmlns", "dcmitype", null, dcmitypeNs);
                 writer.WriteAttributeString("xmlns", "xsi", null, xsiNs);
 
-                writer.WriteElementString("dc", "creator", dcNs, workbook.Author ?? "Nedev.XlsToXlsx");
+                string creator = string.IsNullOrEmpty(workbook.Author)
+                    ? "Nedev.XlsToXlsx"
+                    : workbook.Author!;
+                writer.WriteElementString("dc", "creator", dcNs, creator);
+
+                // LastModifiedBy
+                string lastModifiedBy = !string.IsNullOrEmpty(workbook.LastAuthor)
+                    ? workbook.LastAuthor!
+                    : creator;
+                writer.WriteElementString("cp", "lastModifiedBy", cpNs, lastModifiedBy);
+
+                // 标题/主题/描述/关键字
+                if (!string.IsNullOrEmpty(workbook.Title))
+                    writer.WriteElementString("dc", "title", dcNs, workbook.Title);
+                if (!string.IsNullOrEmpty(workbook.Subject))
+                    writer.WriteElementString("dc", "subject", dcNs, workbook.Subject);
+                if (!string.IsNullOrEmpty(workbook.Comments))
+                    writer.WriteElementString("dc", "description", dcNs, workbook.Comments);
+                if (!string.IsNullOrEmpty(workbook.Keywords))
+                    writer.WriteElementString("cp", "keywords", cpNs, workbook.Keywords);
+
+                DateTime created = workbook.CreatedUtc ?? DateTime.UtcNow;
+                DateTime modified = workbook.ModifiedUtc ?? created;
 
                 writer.WriteStartElement("dcterms", "created", dctermsNs);
                 writer.WriteAttributeString("xsi", "type", xsiNs, "dcterms:W3CDTF");
-                writer.WriteString(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                writer.WriteString(created.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"));
                 writer.WriteEndElement();
 
                 writer.WriteStartElement("dcterms", "modified", dctermsNs);
                 writer.WriteAttributeString("xsi", "type", xsiNs, "dcterms:W3CDTF");
-                writer.WriteString(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                writer.WriteString(modified.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"));
                 writer.WriteEndElement();
 
                 writer.WriteEndElement(); // cp:coreProperties
@@ -517,6 +539,13 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 writer.WriteElementString("Application", propsNs, "Microsoft Excel");
                 writer.WriteElementString("DocSecurity", propsNs, "0");
                 writer.WriteElementString("ScaleCrop", propsNs, "false");
+
+                if (!string.IsNullOrEmpty(workbook.Company))
+                    writer.WriteElementString("Company", propsNs, workbook.Company);
+                if (!string.IsNullOrEmpty(workbook.Manager))
+                    writer.WriteElementString("Manager", propsNs, workbook.Manager);
+                if (!string.IsNullOrEmpty(workbook.Category))
+                    writer.WriteElementString("Category", propsNs, workbook.Category);
 
                 int sheetCount = workbook.Worksheets.Count > 0 ? workbook.Worksheets.Count : 1;
 

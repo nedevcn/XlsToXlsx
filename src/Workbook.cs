@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace Nedev.XlsToXlsx
@@ -31,6 +32,30 @@ namespace Nedev.XlsToXlsx
         /// 注释
         /// </summary>
         public string? Comments { get; set; }
+        /// <summary>
+        /// 文档类别（Category）
+        /// </summary>
+        public string? Category { get; set; }
+        /// <summary>
+        /// 管理者（Manager）
+        /// </summary>
+        public string? Manager { get; set; }
+        /// <summary>
+        /// 公司
+        /// </summary>
+        public string? Company { get; set; }
+        /// <summary>
+        /// 最后保存者
+        /// </summary>
+        public string? LastAuthor { get; set; }
+        /// <summary>
+        /// 创建时间（UTC）
+        /// </summary>
+        public DateTime? CreatedUtc { get; set; }
+        /// <summary>
+        /// 最后修改时间（UTC）
+        /// </summary>
+        public DateTime? ModifiedUtc { get; set; }
         /// <summary>
         /// VBA项目数据
         /// </summary>

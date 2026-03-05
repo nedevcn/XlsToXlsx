@@ -2,6 +2,7 @@ using System.IO;
 using System.Collections.Generic;
 using System;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using Nedev.XlsToXlsx;
 using Nedev.XlsToXlsx.Exceptions;
@@ -117,32 +118,35 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 _oleFile = new OleCompoundFile(_rawStream);
                 Logger.Info("OLE复合文件解析完成");
 
-                // 2. 读取 Workbook 流
+                // 2. 解析 SummaryInformation / DocumentSummaryInformation 文档属性
+                ParseDocumentProperties(workbook);
+
+                // 3. 读取 Workbook 流
                 _workbookData = _oleFile.ReadStreamByName("Workbook")
                              ?? _oleFile.ReadStreamByName("Book")  // Excel 5.0/95 兼容
                              ?? throw new XlsParseException("在OLE文件中未找到Workbook或Book流");
                 Logger.Info($"Workbook流读取完成: {_workbookData.Length} 字节");
 
-                // 3. 在 Workbook MemoryStream 上解析 BIFF 记录
+                // 4. 在 Workbook MemoryStream 上解析 BIFF 记录
                 _stream = new MemoryStream(_workbookData);
                 _reader = new BinaryReader(_stream);
 
-                // 4. 解析全局记录 (BOUNDSHEET, SST, FONT, XF, FORMAT, PALETTE, NAME)
+                // 5. 解析全局记录 (BOUNDSHEET, SST, FONT, XF, FORMAT, PALETTE, NAME)
                 ParseWorkbookGlobals(workbook);
                 Logger.Info($"全局记录解析完成: {workbook.Worksheets.Count} 个工作表, {_sharedStrings.Count} 个共享字符串");
 
-                // 5. 根据 BOUNDSHEET 中记录的偏移量解析各工作表子流
+                // 6. 根据 BOUNDSHEET 中记录的偏移量解析各工作表子流
                 ParseAllWorksheetSubstreams(workbook);
                 Logger.Info("所有工作表子流解析完成");
 
-                // 6. 将解析到的全局数据转移到工作簿对象
+                // 7. 将解析到的全局数据转移到工作簿对象
                 workbook.SharedStrings = _sharedStrings;
                 workbook.Fonts = _fonts;
                 workbook.XfList = _xfList;
                 workbook.NumberFormats = _formats;
                 workbook.Palette = _palette;
 
-                // 7. 解析VBA流
+                // 8. 解析VBA流
                 ParseVbaStream(workbook);
                 Logger.Info("VBA流解析完成");
 
@@ -177,6 +181,211 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         }
         
         // ===== 全局流解析 =====
+        /// <summary>
+        /// 解析 SummaryInformation / DocumentSummaryInformation 属性集，填充 Workbook 元数据。
+        /// </summary>
+        private void ParseDocumentProperties(Workbook workbook)
+        {
+            if (_oleFile == null) return;
+            try
+            {
+                var summary = _oleFile.ReadStreamByName("\u0005SummaryInformation");
+                if (summary != null && summary.Length >= 48)
+                {
+                    ParseSummaryInformation(summary, workbook);
+                }
+
+                var docSummary = _oleFile.ReadStreamByName("\u0005DocumentSummaryInformation");
+                if (docSummary != null && docSummary.Length >= 48)
+                {
+                    ParseDocumentSummaryInformation(docSummary, workbook);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"解析文档属性时发生错误: {ex.Message}");
+            }
+        }
+
+        private static void ParseSummaryInformation(byte[] data, Workbook workbook)
+        {
+            if (!TryReadPropertySection(data, out var props, out int codePage))
+                return;
+
+            foreach (var p in props)
+            {
+                uint vt = BitConverter.ToUInt32(data, p.ValueOffset);
+                switch (p.Id)
+                {
+                    case 2: // Title
+                        workbook.Title ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 3: // Subject
+                        workbook.Subject ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 4: // Author
+                        workbook.Author ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 5: // Keywords
+                        workbook.Keywords ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 6: // Comments
+                        workbook.Comments ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 8: // LastAuthor
+                        workbook.LastAuthor ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 12: // Create time
+                        workbook.CreatedUtc ??= ReadFileTimeUtc(data, p.ValueOffset, vt);
+                        break;
+                    case 13: // Last save time
+                        workbook.ModifiedUtc ??= ReadFileTimeUtc(data, p.ValueOffset, vt);
+                        break;
+                }
+            }
+        }
+
+        private static void ParseDocumentSummaryInformation(byte[] data, Workbook workbook)
+        {
+            if (!TryReadPropertySection(data, out var props, out int codePage))
+                return;
+
+            foreach (var p in props)
+            {
+                uint vt = BitConverter.ToUInt32(data, p.ValueOffset);
+                switch (p.Id)
+                {
+                    case 2: // Category
+                        workbook.Category ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 14: // Manager
+                        workbook.Manager ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                    case 15: // Company
+                        workbook.Company ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
+                        break;
+                }
+            }
+        }
+
+        private readonly struct PropertyRef
+        {
+            public readonly uint Id;
+            public readonly int ValueOffset;
+            public PropertyRef(uint id, int valueOffset)
+            {
+                Id = id;
+                ValueOffset = valueOffset;
+            }
+        }
+
+        /// <summary>
+        /// 解析 OLE PropertySetStream 的首个 section，返回属性列表与代码页。
+        /// </summary>
+        private static bool TryReadPropertySection(byte[] data, out List<PropertyRef> props, out int codePage)
+        {
+            props = new List<PropertyRef>();
+            codePage = 1252;
+            if (data == null || data.Length < 48) return false;
+
+            ushort byteOrder = BitConverter.ToUInt16(data, 0);
+            if (byteOrder != 0xFFFE) return false;
+
+            int cSections = BitConverter.ToInt32(data, 24);
+            if (cSections <= 0) return false;
+
+            int sectionListOffset = 28;
+            if (data.Length < sectionListOffset + 20) return false;
+
+            // 只读第一个 section
+            int sectionOffset = BitConverter.ToInt32(data, sectionListOffset + 16);
+            if (sectionOffset <= 0 || sectionOffset + 8 > data.Length) return false;
+
+            int cbSection = BitConverter.ToInt32(data, sectionOffset);
+            int cProps = BitConverter.ToInt32(data, sectionOffset + 4);
+            if (cProps <= 0) return false;
+
+            int propListOffset = sectionOffset + 8;
+            for (int i = 0; i < cProps; i++)
+            {
+                if (propListOffset + 8 > data.Length) break;
+                uint propId = BitConverter.ToUInt32(data, propListOffset);
+                int offset = BitConverter.ToInt32(data, propListOffset + 4);
+                int valueOffset = sectionOffset + offset;
+                if (valueOffset >= 0 && valueOffset + 8 <= data.Length)
+                    props.Add(new PropertyRef(propId, valueOffset));
+                propListOffset += 8;
+            }
+
+            // 先找 CodePage (propId=1, VT_I2)
+            foreach (var p in props)
+            {
+                if (p.Id != 1) continue;
+                if (p.ValueOffset + 8 > data.Length) continue;
+                uint vt = BitConverter.ToUInt32(data, p.ValueOffset);
+                if (vt == 0x0002 && p.ValueOffset + 6 <= data.Length)
+                {
+                    codePage = BitConverter.ToUInt16(data, p.ValueOffset + 4);
+                }
+                break;
+            }
+
+            return props.Count > 0;
+        }
+
+        private static string? ReadPropertyString(byte[] data, int valueOffset, int codePage, uint vt)
+        {
+            try
+            {
+                if (valueOffset + 8 > data.Length) return null;
+                if (vt == 0x1E) // VT_LPSTR
+                {
+                    int len = BitConverter.ToInt32(data, valueOffset + 4);
+                    if (len <= 0) return null;
+                    int bytesLen = len;
+                    int start = valueOffset + 8;
+                    if (start + bytesLen > data.Length)
+                        bytesLen = Math.Max(0, data.Length - start);
+                    if (bytesLen <= 0) return null;
+                    var enc = Encoding.GetEncoding(codePage <= 0 ? 1252 : codePage);
+                    string s = enc.GetString(data, start, bytesLen);
+                    return s.TrimEnd('\0');
+                }
+                else if (vt == 0x1F) // VT_LPWSTR
+                {
+                    int cch = BitConverter.ToInt32(data, valueOffset + 4);
+                    if (cch <= 0) return null;
+                    int bytesLen = cch * 2;
+                    int start = valueOffset + 8;
+                    if (start + bytesLen > data.Length)
+                        bytesLen = Math.Max(0, data.Length - start);
+                    if (bytesLen <= 0) return null;
+                    string s = Encoding.Unicode.GetString(data, start, bytesLen);
+                    return s.TrimEnd('\0');
+                }
+            }
+            catch
+            {
+                // ignore malformed
+            }
+            return null;
+        }
+
+        private static DateTime? ReadFileTimeUtc(byte[] data, int valueOffset, uint vt)
+        {
+            try
+            {
+                if (vt != 0x40) return null; // VT_FILETIME
+                if (valueOffset + 12 > data.Length) return null;
+                long fileTime = BitConverter.ToInt64(data, valueOffset + 4);
+                if (fileTime <= 0) return null;
+                return DateTime.FromFileTimeUtc(fileTime);
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
         /// <summary>
         /// 解析 Workbook 全局子流（从 BOF 到 EOF），收集 BOUNDSHEET/SST/FONT/XF/FORMAT 等全局记录。
