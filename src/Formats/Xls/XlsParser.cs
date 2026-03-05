@@ -437,6 +437,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 case (ushort)BiffRecordType.EOF:
                     return;
                         case (ushort)BiffRecordType.DIMENSION:
+                            ParseDimensionRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.ROW:
                             var parsedRow = ParseRowRecord(record);
@@ -636,19 +637,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
     
     private void ParseFormatRecord(BiffRecord record)
         {
-            // 解析格式记录
-            if (record.Data != null && record.Data.Length >= 18)
+            byte[] data = record.GetAllData();
+            if (data != null && data.Length >= 18)
             {
-                // 读取格式索引
-                ushort formatIndex = BitConverter.ToUInt16(record.Data, 0);
-                
-                // 读取格式字符串长度
-                byte formatLength = record.Data[2];
-                
-                // 读取格式字符串
-                if (record.Data.Length >= 3 + formatLength)
+                ushort formatIndex = BitConverter.ToUInt16(data, 0);
+                byte formatLength = data[2];
+                if (data.Length >= 3 + formatLength)
                 {
-                    string formatString = System.Text.Encoding.ASCII.GetString(record.Data, 3, formatLength);
+                    string formatString = System.Text.Encoding.ASCII.GetString(data, 3, formatLength);
                     _formats[formatIndex] = formatString;
                 }
             }
@@ -784,19 +780,19 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         
         private void ParseFontRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析字体记录
-            if (record.Data != null && record.Data.Length >= 48)
+            byte[] data = record.GetAllData();
+            if (data != null && data.Length >= 48)
             {
                 var font = new Font();
-                font.Height = BitConverter.ToInt16(record.Data, 0);
-                font.IsBold = (BitConverter.ToUInt16(record.Data, 2) & 0x0001) != 0;
-                font.IsItalic = (BitConverter.ToUInt16(record.Data, 2) & 0x0002) != 0;
-                font.IsUnderline = (BitConverter.ToUInt16(record.Data, 2) & 0x0004) != 0;
-                font.IsStrikethrough = (BitConverter.ToUInt16(record.Data, 2) & 0x0008) != 0;
-                font.ColorIndex = BitConverter.ToUInt16(record.Data, 6);
+                font.Height = BitConverter.ToInt16(data, 0);
+                font.IsBold = (BitConverter.ToUInt16(data, 2) & 0x0001) != 0;
+                font.IsItalic = (BitConverter.ToUInt16(data, 2) & 0x0002) != 0;
+                font.IsUnderline = (BitConverter.ToUInt16(data, 2) & 0x0004) != 0;
+                font.IsStrikethrough = (BitConverter.ToUInt16(data, 2) & 0x0008) != 0;
+                font.ColorIndex = BitConverter.ToUInt16(data, 6);
                 string? wsColor = GetColorFromPalette(font.ColorIndex);
                 font.Color = string.IsNullOrEmpty(wsColor) ? null : wsColor.Replace("#", "");
-                font.Name = System.Text.Encoding.ASCII.GetString(record.Data, 40, record.Data.Length - 40).TrimEnd('\0');
+                font.Name = System.Text.Encoding.ASCII.GetString(data, 40, data.Length - 40).TrimEnd('\0');
 
                 worksheet.Fonts.Add(font);
             }
@@ -1483,10 +1479,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             if (record.Data == null || record.Data.Length < 8) return;
 
             int uniqueCount = BitConverter.ToInt32(record.Data, 4);
+            // 防止损坏文件中的异常计数值导致超大分配或死循环（Excel 实际限制约 65535 唯一字符串/工作簿）
+            const int maxUniqueCount = 2 * 1024 * 1024;
+            if (uniqueCount < 0 || uniqueCount > maxUniqueCount)
+                uniqueCount = Math.Clamp(uniqueCount, 0, maxUniqueCount);
             _sharedStrings.Capacity = Math.Max(_sharedStrings.Capacity, uniqueCount);
 
             var stringReader = new BiffStringReader(record, 8); // SST Header size is 8 bytes
-            
+
             for (int i = 0; i < uniqueCount; i++)
             {
                 string str = stringReader.ReadString();
@@ -1581,35 +1581,35 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private void ParseFontRecordToGlobal(BiffRecord record)
         {
-            if (record.Data != null && record.Data.Length >= 14)
+            byte[] data = record.GetAllData();
+            if (data != null && data.Length >= 14)
             {
                 var font = new Font();
-                font.Height = BitConverter.ToInt16(record.Data, 0);
-                ushort grbit = BitConverter.ToUInt16(record.Data, 2);
-                font.IsBold = BitConverter.ToUInt16(record.Data, 6) >= 700;
+                font.Height = BitConverter.ToInt16(data, 0);
+                ushort grbit = BitConverter.ToUInt16(data, 2);
+                font.IsBold = BitConverter.ToUInt16(data, 6) >= 700;
                 font.IsItalic = (grbit & 0x0002) != 0;
-                font.IsUnderline = (record.Data[10]) != 0;
+                font.IsUnderline = (data[10]) != 0;
                 font.IsStrikethrough = (grbit & 0x0008) != 0;
-                font.ColorIndex = BitConverter.ToUInt16(record.Data, 4);
+                font.ColorIndex = BitConverter.ToUInt16(data, 4);
                 string? resolved = GetColorFromPalette(font.ColorIndex);
                 font.Color = string.IsNullOrEmpty(resolved) ? null : resolved.Replace("#", "");
 
                 int nameOffset = 14;
-                if (record.Data.Length > nameOffset)
+                if (data.Length > nameOffset)
                 {
-                    // BIFF8 Font record uses ShortXLUnicodeString at offset 14 (1 byte len + 1 byte option)
-                    byte len = record.Data[nameOffset];
-                    if (record.Data.Length > nameOffset + 1)
+                    byte len = data[nameOffset];
+                    if (data.Length > nameOffset + 1)
                     {
-                        byte opt = record.Data[nameOffset + 1];
+                        byte opt = data[nameOffset + 1];
                         bool isUni = (opt & 0x01) != 0;
                         if (isUni)
                         {
-                           font.Name = System.Text.Encoding.Unicode.GetString(record.Data, nameOffset + 2, Math.Min(len * 2, record.Data.Length - nameOffset - 2));
+                           font.Name = System.Text.Encoding.Unicode.GetString(data, nameOffset + 2, Math.Min(len * 2, data.Length - nameOffset - 2));
                         }
                         else
                         {
-                           font.Name = System.Text.Encoding.ASCII.GetString(record.Data, nameOffset + 2, Math.Min(len, record.Data.Length - nameOffset - 2));
+                           font.Name = System.Text.Encoding.ASCII.GetString(data, nameOffset + 2, Math.Min(len, data.Length - nameOffset - 2));
                         }
                     }
                 }
@@ -2087,6 +2087,21 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             
             return excelBaseDate.AddDays(excelDate);
         }
+
+        /// <summary>解析 BIFF8 DIMENSION (0x0200)：firstRow(4), lastRow(4), firstCol(2), lastCol(2), reserved(2)。行列均为 0-based，用于初始化或扩展 MaxRow/MaxColumn。</summary>
+        private void ParseDimensionRecord(BiffRecord record, Worksheet worksheet)
+        {
+            byte[] data = record.Data;
+            if (data == null || data.Length < 14)
+                return;
+            int lastRow = BitConverter.ToInt32(data, 4);
+            int lastCol = BitConverter.ToUInt16(data, 10);
+            // 空表或无效值：lastRow/lastCol 可能为 -1 或 0xFFFF，只接受有效范围
+            if (lastRow >= 0 && lastRow < 1048576)
+                worksheet.MaxRow = Math.Max(worksheet.MaxRow, lastRow + 1);
+            if (lastCol >= 0 && lastCol < 16384)
+                worksheet.MaxColumn = Math.Max(worksheet.MaxColumn, lastCol + 1);
+        }
         
         private void ParseMergeCellsRecord(BiffRecord record, Worksheet worksheet)
         {
@@ -2175,7 +2190,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             byte nameLen = data[3];
             ushort formulaLen = BitConverter.ToUInt16(data, 4);
             bool hidden = (options & 0x0001) != 0;
-            int localSheetId = (options >> 5) & 0x0FFF;
+            // itab 在偏移 8-9：非 0 表示局部名称，值为 1-based 的 BoundSheet8 索引
+            ushort itab = data.Length >= 10 ? BitConverter.ToUInt16(data, 8) : (ushort)0;
+            int localSheetId = itab > 0 ? (int)(itab - 1) : 0;
             int offset = 14;
             string name = ReadBiffStringFromBytes(data, ref offset, nameLen);
             byte[] formulaData = new byte[formulaLen];
@@ -2187,7 +2204,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 Name = name,
                 Formula = formula,
                 Hidden = hidden,
-                LocalSheetId = localSheetId > 0 ? (int?)(localSheetId - 1) : null
+                LocalSheetId = itab > 0 ? (int?)(localSheetId) : null
             });
         }
 

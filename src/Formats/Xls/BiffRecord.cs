@@ -20,24 +20,24 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         public byte[] GetAllData()
         {
             if (Data == null) return Array.Empty<byte>();
-            if (Continues.Count == 0) return Data;
+            if (Continues == null || Continues.Count == 0) return Data;
 
             int totalLength = Data.Length;
             foreach (var chunk in Continues)
             {
-                totalLength += chunk.Length;
+                if (chunk != null)
+                    totalLength += chunk.Length;
             }
 
             byte[] fullData = new byte[totalLength];
             Array.Copy(Data, 0, fullData, 0, Data.Length);
-            
             int offset = Data.Length;
             foreach (var chunk in Continues)
             {
+                if (chunk == null || chunk.Length == 0) continue;
                 Array.Copy(chunk, 0, fullData, offset, chunk.Length);
                 offset += chunk.Length;
             }
-            
             return fullData;
         }
 

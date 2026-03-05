@@ -1674,29 +1674,26 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
 
         private void CreateSharedStringsXml(ZipArchive archive, Workbook workbook)
         {
-            // 收集所有共享字符串
             var sharedStrings = new List<string>();
-            var stringCount = 0;
-            
-            // 遍历所有工作表
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            int stringCount = 0;
+
             foreach (var worksheet in workbook.Worksheets)
             {
-                // 遍历所有行和单元格
                 foreach (var row in worksheet.Rows ?? Enumerable.Empty<Row>())
                 {
                     foreach (var cell in row.Cells ?? Enumerable.Empty<Cell>())
                     {
                         if (cell == null) continue;
-                        if (cell.DataType == "s" || cell.DataType == "inlineStr" || (cell.DataType == null && cell.Value is string))
-                {
-                    var textValue = cell.Value?.ToString() ?? "";
-                    // 检查字符串是否已经存在
-                    if (!sharedStrings.Contains(textValue))
-                    {
-                        sharedStrings.Add(textValue);
-                    }
-                    stringCount++;
-                }
+                        if (cell.DataType != "s" && cell.DataType != "inlineStr" && (cell.DataType != null || !(cell.Value is string)))
+                            continue;
+                        var textValue = cell.Value?.ToString() ?? "";
+                        if (!seen.Contains(textValue))
+                        {
+                            seen.Add(textValue);
+                            sharedStrings.Add(textValue);
+                        }
+                        stringCount++;
                     }
                 }
             }
@@ -2472,12 +2469,10 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             TimeSpan timeSpan = dateTime - excelBaseDate;
             double days = timeSpan.TotalDays;
             
-            // 调整 1900 年闰年问题
+            // Excel 将 1900 当作闰年：序列 60 = 1900-02-29（虚构），61 = 1900-03-01。.NET 中 1900-03-01 距 1900-01-01 为 59 天，故需 +2 得 61。
             if (dateTime >= new DateTime(1900, 3, 1))
-            {
-                days += 1;
-            }
-            
+                days += 2;
+
             return days;
         }
         
