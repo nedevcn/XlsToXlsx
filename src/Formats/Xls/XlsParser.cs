@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Collections.Generic;
 using System;
 using System.Linq;
@@ -20,6 +20,30 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         private Dictionary<ushort, string> _formats = new Dictionary<ushort, string>();
         private Dictionary<int, string> _palette = new Dictionary<int, string>();
         private Workbook _workbook = null!;
+
+        /// <summary>BIFF8 默认 64 色调色板 (索引 0-63)，无 PALETTE 记录时使用。与 Excel 默认一致。</summary>
+        private static readonly IReadOnlyDictionary<int, string> Biff8DefaultPalette = CreateBiff8DefaultPalette();
+
+        private static IReadOnlyDictionary<int, string> CreateBiff8DefaultPalette()
+        {
+            var d = new Dictionary<int, string>();
+            // 0-7: 固定色
+            string[] first8 = { "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF" };
+            for (int i = 0; i < first8.Length; i++) d[i] = first8[i];
+            // 8-63: Excel 默认 56 色 (标准 BIFF8 调色板)
+            string[] rest = {
+                "800000", "000080", "008000", "008080", "800080", "808000", "C0C0C0", "808080",
+                "9999FF", "993366", "FFFFCC", "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF",
+                "000080", "FF00FF", "FFFF00", "00FFFF", "800080", "800000", "008080", "0000FF",
+                "00CCFF", "CCFFFF", "CCFFCC", "FFFF99", "99CCFF", "FF99CC", "CC99FF", "FFCC99",
+                "3366FF", "33CCCC", "99CC00", "FFCC00", "FF9900", "FF6600", "666699", "969696",
+                "003366", "339966", "003300", "333300", "993300", "993366", "999933", "666666",
+                "0066FF", "00CCFF", "00FFFF", "00CC00", "00FF00", "99FF00", "99CC00", "999900"
+            };
+            for (int i = 0; i < rest.Length && (8 + i) <= 63; i++) d[8 + i] = rest[i];
+            return d;
+        }
+
         private const long MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB文件大小限制
 
         // 工作簿级别的OfficeArt (DggContainer bytes)
@@ -419,6 +443,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             var existingRow = GetOrCreateRow(worksheet, ref currentRow, parsedRow.RowIndex);
                             existingRow.Height = parsedRow.Height;
                             existingRow.CustomHeight = parsedRow.CustomHeight;
+                            existingRow.DefaultXfIndex = parsedRow.DefaultXfIndex;
                             if (existingRow.RowIndex > worksheet.MaxRow) worksheet.MaxRow = (int)existingRow.RowIndex;
                             break;
                         case (ushort)BiffRecordType.CELL_BLANK:
@@ -872,18 +897,21 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     xf.BorderIndex = _workbook.Borders.Count - 1;
                 }
 
-                // 解析填充 (偏移18-21)
+                // 解析填充 (偏移18-21)：低6位=pattern，次7位=icvFore，icvBack 在字节20
                 if (record.Data.Length >= 22)
                 {
                     ushort fillData = BitConverter.ToUInt16(record.Data, 18);
                     byte pattern = (byte)(fillData & 0x3F);
-                    
+                    int icvFore = (fillData >> 6) & 0x7F;
+                    int icvBack = record.Data.Length > 20 ? (record.Data[20] & 0x7F) : 65;
+
                     var fill = new Fill();
                     fill.PatternType = GetPatternType(pattern);
-                    // 填充颜色处理通常更复杂，涉及前景色和背景色
-                    
+                    fill.ForegroundColor = GetColorFromPalette(icvFore);
+                    fill.BackgroundColor = GetColorFromPalette(icvBack);
+
                     _workbook.Fills.Add(fill);
-                    xf.FillIndex = _workbook.Fills.Count - 1;
+                    xf.FillIndex = _workbook.Fills.Count + 1; // 2-based: 0=none, 1=gray125, 2+=workbook.Fills
                 }
                 
                 // 解析锁定和隐藏状态
@@ -1757,16 +1785,27 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     }
                 }
 
-                // 解析填充 (偏移18-21)
+                // 解析填充 (偏移18-21)：低6位=pattern，次7位=icvFore，icvBack 在字节20
                 if (record.Data.Length >= 20)
                 {
                     ushort fillData = BitConverter.ToUInt16(record.Data, 18);
                     byte pattern = (byte)(fillData & 0x3F);
+                    int icvFore = (fillData >> 6) & 0x7F;
+                    int icvBack = record.Data.Length > 20 ? (record.Data[20] & 0x7F) : 65;
+
                     if (pattern > 0)
                     {
-                        var fill = new Fill { PatternType = GetPatternType(pattern) };
-                        int existingFillIdx = _workbook.Fills.FindIndex(f => f.PatternType == fill.PatternType);
-                        
+                        var fill = new Fill
+                        {
+                            PatternType = GetPatternType(pattern),
+                            ForegroundColor = GetColorFromPalette(icvFore),
+                            BackgroundColor = GetColorFromPalette(icvBack)
+                        };
+                        int existingFillIdx = _workbook.Fills.FindIndex(f =>
+                            f.PatternType == fill.PatternType &&
+                            f.ForegroundColor == fill.ForegroundColor &&
+                            f.BackgroundColor == fill.BackgroundColor);
+
                         if (existingFillIdx >= 0)
                         {
                             xf.FillIndex = existingFillIdx + 2; // 0 和 1 是默认
@@ -1841,7 +1880,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     // BIFF8 spec: bit 15 of miHeight is fGhost (1 = default height, 0 = custom height)
                     row.Height = (ushort)(rawHeight & 0x7FFF);
                     row.CustomHeight = (rawHeight & 0x8000) == 0;
-                    
+
+                    // 偏移 16: ixfe 行默认 XF 索引（整行背景色等）
+                    if (record.Data.Length >= 18)
+                    {
+                        ushort ixfe = BitConverter.ToUInt16(record.Data, 16);
+                        row.DefaultXfIndex = ixfe;
+                    }
+
                     // Option flags at offset 12
                     if (record.Data.Length >= 14)
                     {
@@ -1879,12 +1925,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 ushort colIndex = BitConverter.ToUInt16(data, 2);
                 cell.ColumnIndex = colIndex + 1;
                 
-                // 读取样式索引 (XF index)
+                // 读取样式索引 (XF index)，0 也要设置，否则第一行用 XF 0 时不会写出 s="0"
                 ushort styleIndex = BitConverter.ToUInt16(data, 4);
-                if (styleIndex > 0)
-                {
-                    cell.StyleId = styleIndex.ToString();
-                }
+                cell.StyleId = styleIndex.ToString();
                 
                 // 根据记录类型解析单元格值
                 switch (record.Id)
@@ -2419,13 +2462,16 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         {
             if (colorIndex == 64) return null; // System Foreground
             if (colorIndex == 65) return null; // System Background
-            
+
             if (_workbook.Palette.TryGetValue(colorIndex, out string? color))
                 return color.Replace("#", "");
-            
+
             if (_palette.TryGetValue(colorIndex, out string? palColor))
                 return palColor.Replace("#", "");
-                
+
+            if (Biff8DefaultPalette.TryGetValue(colorIndex, out string? defaultColor))
+                return defaultColor;
+
             return null;
         }
 

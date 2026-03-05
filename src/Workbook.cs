@@ -726,6 +726,10 @@ namespace Nedev.XlsToXlsx
         /// 是否自定义行高
         /// </summary>
         public bool CustomHeight { get; set; }
+        /// <summary>
+        /// 行默认 XF 索引（来自 ROW 记录的 ixfe），用于整行格式如背景色
+        /// </summary>
+        public int? DefaultXfIndex { get; set; }
     }
 
     /// <summary>

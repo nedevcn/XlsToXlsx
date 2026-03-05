@@ -37,15 +37,31 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
         {
             if (string.IsNullOrEmpty(input))
                 return string.Empty;
+
+            // 将一些老式 Wingdings/符号字体中的项目符号等字符规范化为标准 Unicode 符号，避免在不同机器/字体下显示为“乱码”
+            char NormalizeChar(char c)
+            {
+                // 常见的私有区项目符号（例如  等）统一映射为标准实心圆点
+                if (c == '\uF0B7' || c == '\uF06C')
+                    return '\u2022'; // '•'
+
+                // 非断行空格等统一为普通空格，避免复制/显示异常
+                if (c == '\u00A0')
+                    return ' ';
+
+                return c;
+            }
             
-            // 移除XML无效字符
-            return new string(input.Where(c => 
-                (c >= 0x0020 && c <= 0xD7FF) ||
-                (c >= 0xE000 && c <= 0xFFFD) ||
-                c == 0x0009 ||
-                c == 0x000A ||
-                c == 0x000D
-            ).ToArray());
+            // 先做字符规范化，再移除 XML 无效字符
+            return new string(input
+                .Select(NormalizeChar)
+                .Where(c =>
+                    (c >= 0x0020 && c <= 0xD7FF) ||
+                    (c >= 0xE000 && c <= 0xFFFD) ||
+                    c == 0x0009 ||
+                    c == 0x000A ||
+                    c == 0x000D)
+                .ToArray());
         }
 
         /// <summary>
@@ -789,15 +805,16 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                                 writer.WriteAttributeString("t", cell.DataType);
                             }
                             
-                            // 样式ID (clamp to valid cellXfs index to avoid "Repaired Records: Format" corruption)
+                            // 样式ID：优先用单元格的 StyleId，否则用行的默认 XF（如整行背景）
+                            int? styleToUse = null;
                             if (!string.IsNullOrEmpty(cell.StyleId) && int.TryParse(cell.StyleId, out int styleIdVal))
-                            {
-                                writer.WriteAttributeString("s", Math.Clamp(styleIdVal, 0, maxStyleId).ToString());
-                            }
+                                styleToUse = styleIdVal;
+                            else if (row.DefaultXfIndex.HasValue)
+                                styleToUse = row.DefaultXfIndex.Value;
                             else if (isDateCell)
-                            {
-                                writer.WriteAttributeString("s", Math.Min(1, maxStyleId).ToString());
-                            }
+                                styleToUse = Math.Min(1, maxStyleId);
+                            if (styleToUse.HasValue)
+                                writer.WriteAttributeString("s", Math.Clamp(styleToUse.Value, 0, maxStyleId).ToString());
                             
                             // 处理公式
                             if (cell.DataType == "f")
@@ -1191,17 +1208,34 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 writer.WriteAttributeString("data", "1");
                 writer.WriteEndElement();
                 writer.WriteEndElement();
+
+                // 定义批注使用的 shapetype（_x0000_t202），否则引用 type=\"#_x0000_t202\" 的 shape 在某些 Excel 版本中会被当作损坏的 drawing 修复/移除
+                writer.WriteStartElement("shapetype", "urn:schemas-microsoft-com:vml");
+                writer.WriteAttributeString("id", "_x0000_t202");
+                writer.WriteAttributeString("coordsize", "21600,21600");
+                writer.WriteAttributeString("o", "spt", "urn:schemas-microsoft-com:office:office", "202");
+                writer.WriteAttributeString("path", "m,l,21600r21600,l21600,xe");
+                writer.WriteStartElement("stroke", "urn:schemas-microsoft-com:vml");
+                writer.WriteAttributeString("joinstyle", "miter");
+                writer.WriteEndElement();
+                writer.WriteStartElement("path", "urn:schemas-microsoft-com:vml");
+                writer.WriteAttributeString("gradientshapeok", "t");
+                writer.WriteAttributeString("o", "connecttype", "urn:schemas-microsoft-com:office:office", "rect");
+                writer.WriteEndElement();
+                writer.WriteEndElement();
                 
                 writer.WriteStartElement("shapes", "urn:schemas-microsoft-com:vml");
                 writer.WriteAttributeString("ext", "urn:schemas-microsoft-com:vml", "edit");
                 writer.WriteAttributeString("class", "x:WorksheetComments");
                 
+                // 为每个批注生成唯一的 shape id，避免所有批注共用 _x0000_s1025 导致 Excel 报错/修复 drawing
+                int shapeIndex = 1025;
                 foreach (var comment in worksheet.Comments)
                 {
                     string cellRef = GetCellReference(comment.RowIndex, comment.ColumnIndex);
                     
                     writer.WriteStartElement("shape", "urn:schemas-microsoft-com:vml");
-                    writer.WriteAttributeString("id", "_x0000_s1025");
+                    writer.WriteAttributeString("id", "_x0000_s" + shapeIndex.ToString());
                     writer.WriteAttributeString("type", "#_x0000_t202");
                     writer.WriteAttributeString("style", "position:absolute;margin-left:59.25pt;margin-top:1.5pt;width:150pt;height:55.5pt;z-index:1");
                     writer.WriteAttributeString("fillcolor", "#ffffe1");
@@ -1248,6 +1282,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement();
                     
                     writer.WriteEndElement();
+                    shapeIndex++;
                 }
                 
                 writer.WriteEndElement();
@@ -1435,13 +1470,13 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                         if (!string.IsNullOrEmpty(fill.ForegroundColor))
                         {
                             writer.WriteStartElement("fgColor");
-                            writer.WriteAttributeString("rgb", fill.ForegroundColor);
+                            writer.WriteAttributeString("rgb", fill.ForegroundColor.TrimStart('#'));
                             writer.WriteEndElement();
                         }
                         if (!string.IsNullOrEmpty(fill.BackgroundColor))
                         {
                             writer.WriteStartElement("bgColor");
-                            writer.WriteAttributeString("rgb", fill.BackgroundColor);
+                            writer.WriteAttributeString("rgb", fill.BackgroundColor.TrimStart('#'));
                             writer.WriteEndElement();
                         }
                         writer.WriteEndElement();
