@@ -293,9 +293,10 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 var imageExtensions = new HashSet<string>();
                 foreach (var ws in workbook.Worksheets)
                 {
+                    if (ws?.Pictures == null) continue;
                     foreach (var pic in ws.Pictures)
                     {
-                        if (!string.IsNullOrEmpty(pic.Extension))
+                        if (pic != null && !string.IsNullOrEmpty(pic.Extension))
                             imageExtensions.Add(pic.Extension.ToLower());
                     }
                 }

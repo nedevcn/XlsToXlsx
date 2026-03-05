@@ -1977,8 +1977,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         // 富文本值
                         if (data.Length > 6)
                         {
-                            // 解析富文本格式
-                            cell.RichText = ParseRichText(record.Data ?? Array.Empty<byte>(), 6);
+                            // 解析富文本格式（使用完整 data 以支持 CONTINUE）
+                            cell.RichText = ParseRichText(data, 6);
                             cell.DataType = "inlineStr";
                             // 同时设置Value为纯文本，确保兼容性
                             cell.Value = string.Join("", cell.RichText.Select(r => r.Text));
@@ -1986,9 +1986,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         break;
                     case (ushort)BiffRecordType.CELL_LABELSST:
                         // 共享字符串表中的索引
-                        if (record.Data.Length >= 8)
+                        if (data.Length >= 10)
                         {
-                            int sstIndex = BitConverter.ToInt32(record.Data, 6);
+                            int sstIndex = BitConverter.ToInt32(data, 6);
                             if (sstIndex >= 0 && sstIndex < _sharedStrings.Count)
                             {
                                 cell.Value = _sharedStrings[sstIndex];
@@ -1998,9 +1998,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         break;
                     case (ushort)BiffRecordType.CELL_NUMBER:
                         // 数值
-                        if (record.Data.Length >= 14)
+                        if (data.Length >= 14)
                         {
-                            double value = BitConverter.ToDouble(record.Data, 6);
+                            double value = BitConverter.ToDouble(data, 6);
                             // 检查是否为日期时间值（Excel 日期时间是从 1900-01-01 开始的天数）
                             if (IsDateTimeValue(value))
                             {
@@ -2016,9 +2016,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         break;
                     case (ushort)BiffRecordType.CELL_RK:
                         // 压缩数值
-                        if (record.Data.Length >= 10)
+                        if (data.Length >= 10)
                         {
-                            int rkValue = BitConverter.ToInt32(record.Data, 6);
+                            int rkValue = BitConverter.ToInt32(data, 6);
                             double value = DecodeRKValue(rkValue);
                             // 检查是否为日期时间值
                             if (IsDateTimeValue(value))
@@ -2037,19 +2037,19 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         // 公式
                         try
                         {
-                            if (record.Data.Length >= 20)
+                            if (data.Length >= 22)
                             {
                                 // 读取公式结果
-                                double result = BitConverter.ToDouble(record.Data, 6);
+                                double result = BitConverter.ToDouble(data, 6);
                                 
-                                // 读取公式字符串长度
-                                int formulaLength = BitConverter.ToUInt16(record.Data, 20); // Length of Ptgs is at offset 20 usually
+                                // 读取公式 Ptgs 长度（BIFF8 FORMULA 中通常在偏移 20）
+                                int formulaLength = BitConverter.ToUInt16(data, 20);
                                 
-                                // 读取公式 Ptgs
-                                if (record.Data.Length >= 22 + formulaLength)
+                                // 读取公式 Ptgs（使用 data 以支持 CONTINUE 分片）
+                                if (data.Length >= 22 + formulaLength)
                                 {
                                     byte[] ptgs = new byte[formulaLength];
-                                    Array.Copy(record.Data, 22, ptgs, 0, formulaLength);
+                                    Array.Copy(data, 22, ptgs, 0, formulaLength);
                                     string formula = FormulaDecompiler.Decompile(ptgs);
                                     
                                     cell.Formula = formula;
@@ -2193,29 +2193,30 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         
         private void ParseMergeCellsRecord(BiffRecord record, Worksheet worksheet)
         {
-            // 解析合并单元格记录
-            if (record.Data != null && record.Data.Length >= 8)
+            // BIFF8 MERGECELLS: count(2) + [startRow(2),startCol(2),endRow(2),endCol(2)]*count，最多1027个范围
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 2)
+                return;
+            ushort count = BitConverter.ToUInt16(data, 0);
+            for (int i = 0; i < count; i++)
             {
-                // 读取合并单元格的范围
-                ushort startRow = BitConverter.ToUInt16(record.Data, 0);
-                ushort startCol = BitConverter.ToUInt16(record.Data, 2);
-                ushort endRow = BitConverter.ToUInt16(record.Data, 4);
-                ushort endCol = BitConverter.ToUInt16(record.Data, 6);
-                
-                // 验证合并单元格范围是否有效
-                if (startRow > 0 && endRow > 0 && startRow <= endRow && startCol <= endCol)
+                int offset = 2 + i * 8;
+                if (offset + 8 > data.Length)
+                    break;
+                ushort startRow = BitConverter.ToUInt16(data, offset);
+                ushort startCol = BitConverter.ToUInt16(data, offset + 2);
+                ushort endRow = BitConverter.ToUInt16(data, offset + 4);
+                ushort endCol = BitConverter.ToUInt16(data, offset + 6);
+                // 有效范围：startRow<=endRow && startCol<=endCol（BIFF 行列均为 0-based，含首行/首列）
+                if (startRow <= endRow && startCol <= endCol)
                 {
-                    // 创建合并单元格对象
-                    var mergeCell = new MergeCell
+                    worksheet.MergeCells.Add(new MergeCell
                     {
-                        StartRow = startRow + 1, // 转为1-based
-                        StartColumn = startCol + 1, // 转换为从1开始的索引
-                        EndRow = endRow + 1, // 转为1-based
-                        EndColumn = endCol + 1 // 转换为从1开始的索引
-                    };
-                    
-                    // 添加到工作表的合并单元格列表
-                    worksheet.MergeCells.Add(mergeCell);
+                        StartRow = startRow + 1,
+                        StartColumn = startCol + 1,
+                        EndRow = endRow + 1,
+                        EndColumn = endCol + 1
+                    });
                 }
             }
         }
