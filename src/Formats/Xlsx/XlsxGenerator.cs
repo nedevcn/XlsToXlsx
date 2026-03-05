@@ -575,13 +575,16 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 if (workbook.DefinedNames != null && workbook.DefinedNames.Count > 0)
                 {
                     writer.WriteStartElement("definedNames");
+                    int sheetCountForNames = Math.Max(1, workbook.Worksheets?.Count ?? 0);
                     foreach (var dn in workbook.DefinedNames)
                     {
+                        if (string.IsNullOrEmpty(dn?.Name)) continue;
                         writer.WriteStartElement("definedName");
-                        writer.WriteAttributeString("name", dn.Name);
-                        if (dn.LocalSheetId.HasValue)
+                        writer.WriteAttributeString("name", dn.Name!);
+                        if (dn.LocalSheetId.HasValue && sheetCountForNames > 0)
                         {
-                            writer.WriteAttributeString("localSheetId", dn.LocalSheetId.Value.ToString());
+                            int localId = Math.Clamp(dn.LocalSheetId.Value, 0, sheetCountForNames - 1);
+                            writer.WriteAttributeString("localSheetId", localId.ToString());
                         }
                         if (dn.Hidden)
                         {
@@ -790,9 +793,9 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     // 用于跟踪已处理的列索引，防止重复
                     var processedColumns = new HashSet<int>();
                     
-                    foreach (var cell in row.Cells)
+                    foreach (var cell in row.Cells ?? Enumerable.Empty<Cell>())
                     {
-                        // 确保列索引有效且未处理过
+                        if (cell == null) continue;
                         if (cell.ColumnIndex > 0 && cell.ColumnIndex <= 16384 && !processedColumns.Contains(cell.ColumnIndex))
                         {
                             writer.WriteStartElement("c");
@@ -1303,18 +1306,26 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteStartDocument();
                     writer.WriteStartElement("styleSheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
                     
-                    // 数字格式
+                    // 数字格式：内置 0–163 由 Excel 定义，自定义从 164 起
                     writer.WriteStartElement("numFmts");
-                    // 至少需要一个数字格式（日期时间格式）
-                    int numFmtCount = 1;
+                    var customFormatIndices = (workbook.NumberFormats?.Keys ?? Enumerable.Empty<ushort>()).OrderBy(x => x).ToList();
+                    int numFmtCount = 1 + customFormatIndices.Count;
                     writer.WriteAttributeString("count", numFmtCount.ToString());
-                    
-                    // 添加日期时间格式
                     writer.WriteStartElement("numFmt");
                     writer.WriteAttributeString("numFmtId", "164");
                     writer.WriteAttributeString("formatCode", "m/d/yyyy");
                     writer.WriteEndElement();
-                    
+                    for (int i = 0; i < customFormatIndices.Count; i++)
+                    {
+                        ushort idx = customFormatIndices[i];
+                        if (workbook.NumberFormats!.TryGetValue(idx, out string? formatCode) && !string.IsNullOrEmpty(formatCode))
+                        {
+                            writer.WriteStartElement("numFmt");
+                            writer.WriteAttributeString("numFmtId", (165 + i).ToString());
+                            writer.WriteAttributeString("formatCode", CleanXmlString(formatCode));
+                            writer.WriteEndElement();
+                        }
+                    }
                     writer.WriteEndElement();
                     
                     // 字体
@@ -1595,11 +1606,21 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     int maxFontId = Math.Max(0, fonts.Count - 1);
                     int maxFillId = Math.Max(0, fills.Count - 1);
                     int maxBorderId = Math.Max(0, borders.Count - 1);
+                    int customFormatBaseId = 165;
                     foreach (var xf in xfs)
                     {
                         writer.WriteStartElement("xf");
-                        // Xf.NumberFormatIndex / FontIndex are ushort; clamp after casting to int to avoid ambiguous Math.Min overloads
-                        int numFmtId = xf.NumberFormatIndex > 0 ? Math.Min((int)xf.NumberFormatIndex, 164) : 0;
+                        int numFmtId;
+                        if (xf.NumberFormatIndex > 0 && customFormatIndices.Count > 0)
+                        {
+                            int customIdx = customFormatIndices.IndexOf(xf.NumberFormatIndex);
+                            if (customIdx >= 0)
+                                numFmtId = customFormatBaseId + customIdx;
+                            else
+                                numFmtId = Math.Min((int)xf.NumberFormatIndex, 163);
+                        }
+                        else
+                            numFmtId = xf.NumberFormatIndex > 0 ? Math.Min((int)xf.NumberFormatIndex, 163) : 0;
                         int fontId = xf.FontIndex > 0 ? Math.Min((int)xf.FontIndex, maxFontId) : 0;
                         int fillId = xf.FillIndex > 0 ? Math.Min(xf.FillIndex, maxFillId) : 0;
                         int borderId = xf.BorderIndex > 0 ? Math.Min(xf.BorderIndex, maxBorderId) : 0;
@@ -1670,10 +1691,10 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 // 遍历所有行和单元格
                 foreach (var row in worksheet.Rows ?? Enumerable.Empty<Row>())
                 {
-                    foreach (var cell in row.Cells)
+                    foreach (var cell in row.Cells ?? Enumerable.Empty<Cell>())
                     {
-                        // 只处理文本类型的单元格
-                if (cell.DataType == "s" || cell.DataType == "inlineStr" || (cell.DataType == null && cell.Value is string))
+                        if (cell == null) continue;
+                        if (cell.DataType == "s" || cell.DataType == "inlineStr" || (cell.DataType == null && cell.Value is string))
                 {
                     var textValue = cell.Value?.ToString() ?? "";
                     // 检查字符串是否已经存在

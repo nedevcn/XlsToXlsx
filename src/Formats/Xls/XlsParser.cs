@@ -2181,37 +2181,27 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private void ParseNameRecord(BiffRecord record, Workbook workbook)
         {
-            // NAME 记录 (0x0018) - BIFF8
-            if (record.Data != null && record.Data.Length >= 14)
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 14)
+                return;
+            ushort options = BitConverter.ToUInt16(data, 0);
+            byte nameLen = data[3];
+            ushort formulaLen = BitConverter.ToUInt16(data, 4);
+            bool hidden = (options & 0x0001) != 0;
+            int localSheetId = (options >> 5) & 0x0FFF;
+            int offset = 14;
+            string name = ReadBiffStringFromBytes(data, ref offset, nameLen);
+            byte[] formulaData = new byte[formulaLen];
+            if (formulaLen > 0 && offset + formulaLen <= data.Length)
+                Array.Copy(data, offset, formulaData, 0, formulaLen);
+            string formula = FormulaDecompiler.Decompile(formulaData);
+            workbook.DefinedNames.Add(new DefinedName
             {
-                ushort options = BitConverter.ToUInt16(record.Data, 0);
-                byte nameLen = record.Data[3];
-                ushort formulaLen = BitConverter.ToUInt16(record.Data, 4);
-                
-                bool hidden = (options & 0x0001) != 0;
-                int localSheetId = (options >> 5) & 0x0FFF;
-                
-                int offset = 14;
-                string name = ReadBiffStringFromBytes(record.Data, ref offset, nameLen);
-                
-                byte[] formulaData = new byte[formulaLen];
-                if (offset + formulaLen <= record.Data.Length)
-                {
-                    Array.Copy(record.Data, offset, formulaData, 0, formulaLen);
-                }
-                
-                string formula = FormulaDecompiler.Decompile(formulaData);
-                
-                var definedName = new DefinedName
-                {
-                    Name = name,
-                    Formula = formula,
-                    Hidden = hidden,
-                    LocalSheetId = localSheetId > 0 ? (int?)(localSheetId - 1) : null
-                };
-                
-                workbook.DefinedNames.Add(definedName);
-            }
+                Name = name,
+                Formula = formula,
+                Hidden = hidden,
+                LocalSheetId = localSheetId > 0 ? (int?)(localSheetId - 1) : null
+            });
         }
 
         private void ParsePageSetupRecord(BiffRecord record, Worksheet worksheet)
