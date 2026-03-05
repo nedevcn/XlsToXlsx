@@ -174,6 +174,14 @@ namespace Nedev.XlsToXlsx
         /// 数据透视表列表
         /// </summary>
         public List<PivotTable> PivotTables { get; set; } = new List<PivotTable>();
+        /// <summary>
+        /// 自动筛选：范围（如 "A1:D100"），若为 null 表示无筛选
+        /// </summary>
+        public string? AutoFilterRange { get; set; }
+        /// <summary>
+        /// 自动筛选列索引（相对范围的 0-based 列），与 AUTOFILTER 的 iEntry 对应
+        /// </summary>
+        public List<int> AutoFilterColumnIndices { get; set; } = new List<int>();
     }
 
     /// <summary>

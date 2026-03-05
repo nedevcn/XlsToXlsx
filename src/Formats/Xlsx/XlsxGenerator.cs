@@ -1032,6 +1032,25 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement();
                 }
                 
+                // 自动筛选
+                if (!string.IsNullOrEmpty(worksheet.AutoFilterRange))
+                {
+                    writer.WriteStartElement("autoFilter");
+                    writer.WriteAttributeString("ref", worksheet.AutoFilterRange);
+                    if (worksheet.AutoFilterColumnIndices != null && worksheet.AutoFilterColumnIndices.Count > 0)
+                    {
+                        foreach (int colId in worksheet.AutoFilterColumnIndices)
+                        {
+                            writer.WriteStartElement("filterColumn");
+                            writer.WriteAttributeString("colId", colId.ToString());
+                            writer.WriteStartElement("filters");
+                            writer.WriteEndElement();
+                            writer.WriteEndElement();
+                        }
+                    }
+                    writer.WriteEndElement();
+                }
+                
                 // 写入条件格式信息 (OOXML 要求 conditionalFormatting 在 dataValidations 之前)
                 if (worksheet.ConditionalFormats != null && worksheet.ConditionalFormats.Count > 0)
                 {

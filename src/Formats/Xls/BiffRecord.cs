@@ -145,6 +145,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         NOTE = 0x001C,           // 注释/批注记录 (BIFF8 NOTE)
         CELL_RICH_TEXT = 0x00D1, // 富文本记录
 
+        AUTOFILTERINFO = 0x009E, // 自动筛选列数
+        AUTOFILTER = 0x009D,     // 单列筛选条件
+
         // 数据透视表记录
         SXVIEW = 0x00B0,         // 数据透视表视图属性
         SXVD = 0x00B1,           // 数据透视表字段属性

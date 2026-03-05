@@ -72,6 +72,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         // 数据透视表解析状态
         private PivotTable? _currentPivotTable;
         private PivotField? _currentPivotField;
+        /// <summary>当前解析的工作表索引（0-based），用于解析 AutoFilter 时查找 _FilterDatabase 名称。</summary>
+        private int _currentSheetIndex;
 
         // 共享公式：SHAREDFMLA 后的主公式及范围，用于后续 FORMULA 单元格按行列差调整引用
         private string? _sharedFormulaString;
@@ -330,6 +332,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
                 try
                 {
+                    _currentSheetIndex = i;
                     _stream.Seek(offset, SeekOrigin.Begin);
                     ParseWorksheetSubstream(workbook.Worksheets[i], workbook);
                     Logger.Info($"工作表 {workbook.Worksheets[i].Name} 解析完成: {workbook.Worksheets[i].Rows.Count} 行");
@@ -620,6 +623,12 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         case (ushort)BiffRecordType.SXFIELD:
                         case (ushort)BiffRecordType.SXPI:
                             ParsePivotTableRecord(record, worksheet);
+                            break;
+                        case (ushort)BiffRecordType.AUTOFILTERINFO:
+                            ParseAutoFilterInfoRecord(record, worksheet, workbook);
+                            break;
+                        case (ushort)BiffRecordType.AUTOFILTER:
+                            ParseAutoFilterRecord(record, worksheet);
                             break;
                 case (ushort)BiffRecordType.SST:
                     ParseSstInfo(record, streamEnd);
@@ -2356,6 +2365,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             int localSheetId = itab > 0 ? (int)(itab - 1) : 0;
             int offset = 14;
             string name = ReadBiffStringFromBytes(data, ref offset, nameLen);
+            if (nameLen == 1 && name.Length == 1 && name[0] == '\u000D')
+                name = "FilterDatabase";
             byte[] formulaData = new byte[formulaLen];
             if (formulaLen > 0 && offset + formulaLen <= data.Length)
                 Array.Copy(data, offset, formulaData, 0, formulaLen);
@@ -2617,6 +2628,43 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 
                 Logger.Info($"找到外部工作簿名称引用: {name}");
             }
+        }
+
+        private void ParseAutoFilterInfoRecord(BiffRecord record, Worksheet worksheet, Workbook workbook)
+        {
+            if (record.Data == null || record.Data.Length < 2) return;
+            ushort cEntries = BitConverter.ToUInt16(record.Data, 0);
+            worksheet.AutoFilterColumnIndices.Clear();
+            if (workbook.DefinedNames != null)
+            {
+                foreach (var dn in workbook.DefinedNames)
+                {
+                    if (dn?.Name != "FilterDatabase" && dn?.Name != "_xlnm._FilterDatabase") continue;
+                    if (dn.LocalSheetId.HasValue && dn.LocalSheetId.Value != _currentSheetIndex) continue;
+                    if (string.IsNullOrEmpty(dn.Formula)) continue;
+                    worksheet.AutoFilterRange = StripDefinedNameToRange(dn.Formula);
+                    break;
+                }
+            }
+            if (string.IsNullOrEmpty(worksheet.AutoFilterRange))
+                worksheet.AutoFilterRange = "A1:Z100";
+        }
+
+        private static string StripDefinedNameToRange(string formula)
+        {
+            if (string.IsNullOrEmpty(formula)) return formula;
+            int excl = formula.IndexOf('!');
+            string rangePart = excl >= 0 ? formula.Substring(excl + 1).Trim() : formula;
+            return rangePart.Replace("$", "");
+        }
+
+        private void ParseAutoFilterRecord(BiffRecord record, Worksheet worksheet)
+        {
+            if (record.Data == null || record.Data.Length < 2) return;
+            ushort iEntry = BitConverter.ToUInt16(record.Data, 0);
+            if (worksheet.AutoFilterColumnIndices == null)
+                worksheet.AutoFilterColumnIndices = new List<int>();
+            worksheet.AutoFilterColumnIndices.Add((int)iEntry);
         }
 
         private void ParsePivotTableRecord(BiffRecord record, Worksheet worksheet)
