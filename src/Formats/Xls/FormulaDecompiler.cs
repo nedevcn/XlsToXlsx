@@ -186,14 +186,13 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                             }
                             break;
                         case PtgStr:
-                            if (offset + 1 <= formulaData.Length)
+                            if (offset + 2 <= formulaData.Length)
                             {
                                 int len = formulaData[offset];
-                                // simplified string read (assuming ASCII for this stub)
-                                // standard string in BIFF8 has a flag byte for compression
-                                if (offset + 2 + len <= formulaData.Length)
+                                bool isUnicode = (formulaData[offset + 1] & 0x01) == 1;
+                                int byteCount = isUnicode ? len * 2 : len;
+                                if (offset + 2 + byteCount <= formulaData.Length)
                                 {
-                                    bool isUnicode = (formulaData[offset + 1] & 0x01) == 1;
                                     offset += 2;
                                     if (isUnicode)
                                     {
@@ -208,7 +207,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                                         offset += len;
                                     }
                                 }
-                                else { offset = formulaData.Length; }
+                                else
+                                    offset = formulaData.Length;
                             }
                             break;
 
@@ -336,13 +336,19 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         case PtgRefErr + 0x20:
                         case PtgRefErr + 0x40:
                             stack.Push("#REF!");
-                            offset += 4;
+                            if (offset + 4 <= formulaData.Length)
+                                offset += 4;
+                            else
+                                offset = formulaData.Length;
                             break;
                         case PtgAreaErr:
                         case PtgAreaErr + 0x20:
                         case PtgAreaErr + 0x40:
                             stack.Push("#REF!");
-                            offset += 8;
+                            if (offset + 8 <= formulaData.Length)
+                                offset += 8;
+                            else
+                                offset = formulaData.Length;
                             break;
 
                         case PtgMemArea:

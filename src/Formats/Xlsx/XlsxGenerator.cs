@@ -770,8 +770,8 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     writer.WriteEndElement(); // cols
                 }
                 
-                // sheetData (defensive: Rows can be null if worksheet was built incorrectly)
-                var rows = worksheet.Rows ?? Enumerable.Empty<Row>();
+                // sheetData：OOXML 要求 row 元素按 r 属性升序排列
+                var rows = (worksheet.Rows ?? Enumerable.Empty<Row>()).OrderBy(r => r.RowIndex).ToList();
                 writer.WriteStartElement("sheetData");
                 foreach (var row in rows)
                 {

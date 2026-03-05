@@ -41,12 +41,28 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             return fullData;
         }
 
+        /// <summary>BIFF 单条记录最大长度（含 CONTINUE 前体），防止损坏文件导致巨大分配。</summary>
+        private const int MaxRecordDataLength = 8228;
+
         public static BiffRecord Read(BinaryReader reader)
         {
             var record = new BiffRecord();
             record.Id = reader.ReadUInt16();
             record.Length = reader.ReadUInt16();
-            record.Data = reader.ReadBytes(record.Length);
+            int toRead = record.Length <= MaxRecordDataLength ? record.Length : 0;
+            record.Data = reader.ReadBytes(toRead);
+            if (toRead < record.Length)
+            {
+                // 跳过剩余字节，避免流位置错乱
+                long skip = record.Length - toRead;
+                if (reader.BaseStream.CanSeek && skip <= reader.BaseStream.Length - reader.BaseStream.Position)
+                    reader.BaseStream.Seek(skip, SeekOrigin.Current);
+                else
+                {
+                    for (long i = 0; i < skip && reader.BaseStream.Position < reader.BaseStream.Length; i++)
+                        reader.ReadByte();
+                }
+            }
             return record;
         }
     }
