@@ -967,6 +967,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                     int cfPriority = 1; // 每个 cfRule 必须有唯一的 priority
                     foreach (var cf in worksheet.ConditionalFormats)
                     {
+                        if (cf == null) continue;
                         if (!string.IsNullOrEmpty(cf.Range))
                         {
                             writer.WriteStartElement("conditionalFormatting");
@@ -1362,8 +1363,9 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
             }
             
             // 添加工作簿样式中的字体
-            foreach (var style in workbook.Styles)
+            foreach (var style in workbook.Styles ?? Enumerable.Empty<Style>())
                     {
+                        if (style == null) continue;
                         if (style.Font != null && !fonts.Any(f => 
                             f.Name == style.Font.Name && 
                             f.Size == style.Font.Size && 

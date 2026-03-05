@@ -1289,6 +1289,11 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             int urlLength = BitConverter.ToInt16(data, 18);
             if (urlLength > 0 && data.Length >= 20 + urlLength)
                 hyperlink.Target = System.Text.Encoding.ASCII.GetString(data, 20, urlLength);
+            else if (urlLength > 0 && data.Length > 20)
+            {
+                int safeLen = Math.Min(urlLength, data.Length - 20);
+                hyperlink.Target = System.Text.Encoding.ASCII.GetString(data, 20, safeLen);
+            }
             worksheet.Hyperlinks.Add(hyperlink);
         }
 
@@ -1318,6 +1323,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
         private string GetColumnLetter(int columnIndex)
         {
+            if (columnIndex <= 0) return "A";
             var columnReference = string.Empty;
             int col = columnIndex;
             while (col > 0)

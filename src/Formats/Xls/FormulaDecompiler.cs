@@ -316,10 +316,11 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         case PtgAttr:
                             if (offset + 3 <= formulaData.Length)
                             {
-                                // Attr specifies things like Sum (0x10), space, goto. We can skip the payload usually for visual decomposition.
                                 byte options = formulaData[offset];
-                                ushort data = BitConverter.ToUInt16(formulaData, offset + 1);
                                 offset += 3;
+                                // AttrSpace (0x01) = 1 字节可选；AttrGoto (0x02) = 2 字节可选，需跳过以保持公式解析对齐
+                                if ((options & 0x01) != 0 && offset < formulaData.Length) offset += 1;
+                                if ((options & 0x02) != 0 && offset + 2 <= formulaData.Length) offset += 2;
 
                                 if ((options & 0x10) != 0) // AttrSum
                                 {
