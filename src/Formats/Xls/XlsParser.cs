@@ -1538,6 +1538,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     {
                         byte[] ptg2 = new byte[formula2Size];
                         Array.Copy(data, currentOffset, ptg2, 0, formula2Size);
+                        conditionalFormat.Formula2 = FormulaDecompiler.Decompile(ptg2, _workbook);
                     }
                 }
             }

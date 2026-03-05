@@ -1221,6 +1221,11 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             {
                                 writer.WriteElementString("formula", cf.Formula);
                             }
+                            // between / notBetween 需要两个公式
+                            if ((cf.Operator == "between" || cf.Operator == "notBetween") && !string.IsNullOrEmpty(cf.Formula2))
+                            {
+                                writer.WriteElementString("formula", cf.Formula2);
+                            }
                             
                             // 为不同类型的条件格式添加相应的元素
                             switch (cf.Type)

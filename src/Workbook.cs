@@ -402,6 +402,10 @@ namespace Nedev.XlsToXlsx
         /// </summary>
         public string? Formula { get; set; }
         /// <summary>
+        /// 第二个条件公式（between/notBetween 等需要两个公式时使用）
+        /// </summary>
+        public string? Formula2 { get; set; }
+        /// <summary>
         /// 格式
         /// </summary>
         public string? Format { get; set; }
