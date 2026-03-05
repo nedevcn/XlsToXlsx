@@ -1429,19 +1429,12 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             writer.WriteEndElement();
                         }
                         
-                        // 字体颜色 (color)
-                        if (!string.IsNullOrEmpty(font.Color))
-                        {
-                            writer.WriteStartElement("color");
-                            writer.WriteAttributeString("rgb", font.Color);
-                            writer.WriteEndElement();
-                        }
-                        else
-                        {
-                            writer.WriteStartElement("color");
-                            writer.WriteAttributeString("rgb", "00000000");
-                            writer.WriteEndElement();
-                        }
+                        // 字体颜色 (color)：OOXML rgb 为 6 或 8 位十六进制，不含 #
+                        writer.WriteStartElement("color");
+                        string fontRgb = (font.Color ?? "").Replace("#", "").Trim();
+                        if (fontRgb.Length < 6) fontRgb = "000000";
+                        writer.WriteAttributeString("rgb", fontRgb.Length <= 6 ? fontRgb : fontRgb.Substring(0, 6));
+                        writer.WriteEndElement();
                         
                         // 字体名称 (name)
                         if (!string.IsNullOrEmpty(font.Name))

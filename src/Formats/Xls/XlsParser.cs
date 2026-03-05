@@ -655,101 +655,84 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         }
         
         private void ParseMulRkRecord(BiffRecord record, ref Row currentRow, Worksheet worksheet)
-{
-    // MULRK 记录：一条记录包含多个连续单元格的 RK 值
-    // 格式: row(2) + firstCol(2) + [xfIndex(2) + rkValue(4)] * N + lastCol(2)
-    if (record.Data != null && record.Data.Length >= 6)
-    {
-        ushort row = BitConverter.ToUInt16(record.Data, 0);
-        ushort firstCol = BitConverter.ToUInt16(record.Data, 2);
-        // 最后2字节是lastCol
-        int dataLength = record.Data.Length - 6; // 去掉row(2) + firstCol(2) + lastCol(2)
-        int numCells = dataLength / 6; // 每个单元格占6字节: xfIndex(2) + rkValue(4)
-        
-        var targetRow = GetOrCreateRow(worksheet, ref currentRow, row + 1);
-        
-        for (int j = 0; j < numCells; j++)
         {
-            int offset = 4 + j * 6;
-            if (offset + 6 > record.Data.Length - 2) break; // 边界检查
-            
-            ushort xfIndex = BitConverter.ToUInt16(record.Data, offset);
-            int rkValue = BitConverter.ToInt32(record.Data, offset + 2);
-            double value = DecodeRKValue(rkValue);
-            
-            var cell = new Cell();
-            cell.RowIndex = row + 1; // 转为1-based
-            cell.ColumnIndex = firstCol + j + 1; // 转为1-based
-            cell.Value = value;
-            cell.DataType = "n";
-            cell.StyleId = xfIndex.ToString();
-            targetRow.Cells.Add(cell);
-            
-            if (cell.ColumnIndex > worksheet.MaxColumn)
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 6)
+                return;
+            ushort row = BitConverter.ToUInt16(data, 0);
+            ushort firstCol = BitConverter.ToUInt16(data, 2);
+            int dataLength = data.Length - 6;
+            int numCells = dataLength / 6;
+            var targetRow = GetOrCreateRow(worksheet, ref currentRow, row + 1);
+            for (int j = 0; j < numCells; j++)
             {
-                worksheet.MaxColumn = cell.ColumnIndex;
+                int offset = 4 + j * 6;
+                if (offset + 6 > data.Length) break;
+                ushort xfIndex = BitConverter.ToUInt16(data, offset);
+                int rkValue = BitConverter.ToInt32(data, offset + 2);
+                double value = DecodeRKValue(rkValue);
+                var cell = new Cell
+                {
+                    RowIndex = row + 1,
+                    ColumnIndex = firstCol + j + 1,
+                    Value = value,
+                    DataType = "n",
+                    StyleId = xfIndex.ToString()
+                };
+                targetRow.Cells.Add(cell);
+                if (cell.ColumnIndex > worksheet.MaxColumn)
+                    worksheet.MaxColumn = cell.ColumnIndex;
             }
         }
-    }
-}
         
         private void ParseMulBlankRecord(BiffRecord record, ref Row currentRow, Worksheet worksheet)
-{
-    // MULBLANK 记录：一条记录包含多个连续空白单元格的样式信息
-    // 格式: row(2) + firstCol(2) + [xfIndex(2)] * N + lastCol(2)
-    if (record.Data != null && record.Data.Length >= 6)
-    {
-        ushort row = BitConverter.ToUInt16(record.Data, 0);
-        ushort firstCol = BitConverter.ToUInt16(record.Data, 2);
-        int dataLength = record.Data.Length - 6; // 去掉row(2) + firstCol(2) + lastCol(2)
-        int numCells = dataLength / 2; // 每个单元格占2字节: xfIndex(2)
-        
-        var targetRow = GetOrCreateRow(worksheet, ref currentRow, row + 1);
-        
-        for (int j = 0; j < numCells; j++)
         {
-            int offset = 4 + j * 2;
-            if (offset + 2 > record.Data.Length - 2) break;
-            
-            ushort xfIndex = BitConverter.ToUInt16(record.Data, offset);
-            
-            var cell = new Cell();
-            cell.RowIndex = row + 1; // 转为1-based
-            cell.ColumnIndex = firstCol + j + 1; // 转为1-based
-            cell.Value = null;
-            cell.StyleId = xfIndex.ToString();
-            targetRow.Cells.Add(cell);
-            
-            if (cell.ColumnIndex > worksheet.MaxColumn)
+            byte[] data = record.GetAllData();
+            if (data == null || data.Length < 6)
+                return;
+            ushort row = BitConverter.ToUInt16(data, 0);
+            ushort firstCol = BitConverter.ToUInt16(data, 2);
+            int dataLength = data.Length - 6;
+            int numCells = dataLength / 2;
+            var targetRow = GetOrCreateRow(worksheet, ref currentRow, row + 1);
+            for (int j = 0; j < numCells; j++)
             {
-                worksheet.MaxColumn = cell.ColumnIndex;
+                int offset = 4 + j * 2;
+                if (offset + 2 > data.Length) break;
+                ushort xfIndex = BitConverter.ToUInt16(data, offset);
+                var cell = new Cell
+                {
+                    RowIndex = row + 1,
+                    ColumnIndex = firstCol + j + 1,
+                    Value = null,
+                    StyleId = xfIndex.ToString()
+                };
+                targetRow.Cells.Add(cell);
+                if (cell.ColumnIndex > worksheet.MaxColumn)
+                    worksheet.MaxColumn = cell.ColumnIndex;
             }
         }
-    }
-}
         
         private void ParseColInfoRecord(BiffRecord record, Worksheet worksheet)
         {
-            // COLINFO 记录格式: firstCol(2) + lastCol(2) + width(2) + xfIndex(2) + options(2) + reserved(2)
-            if (record.Data != null && record.Data.Length >= 10)
+            if (record.Data == null || record.Data.Length < 10)
+                return;
+            ushort firstCol = BitConverter.ToUInt16(record.Data, 0);
+            ushort lastCol = BitConverter.ToUInt16(record.Data, 2);
+            if (firstCol > lastCol)
+                return;
+            ushort width = BitConverter.ToUInt16(record.Data, 4);
+            ushort xfIndex = BitConverter.ToUInt16(record.Data, 6);
+            ushort options = BitConverter.ToUInt16(record.Data, 8);
+            bool hidden = (options & 0x0001) != 0;
+            worksheet.ColumnInfos.Add(new ColumnInfo
             {
-                ushort firstCol = BitConverter.ToUInt16(record.Data, 0);
-                ushort lastCol = BitConverter.ToUInt16(record.Data, 2);
-                ushort width = BitConverter.ToUInt16(record.Data, 4);
-                ushort xfIndex = BitConverter.ToUInt16(record.Data, 6);
-                ushort options = BitConverter.ToUInt16(record.Data, 8);
-                bool hidden = (options & 0x0001) != 0;
-                
-                var colInfo = new ColumnInfo
-                {
-                    FirstColumn = firstCol,
-                    LastColumn = lastCol,
-                    Width = width,
-                    XfIndex = xfIndex,
-                    Hidden = hidden
-                };
-                worksheet.ColumnInfos.Add(colInfo);
-            }
+                FirstColumn = firstCol,
+                LastColumn = lastCol,
+                Width = width,
+                XfIndex = xfIndex,
+                Hidden = hidden
+            });
         }
         
         private void ParseWindow2Record(BiffRecord record, Worksheet worksheet)
@@ -811,8 +794,10 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 font.IsUnderline = (BitConverter.ToUInt16(record.Data, 2) & 0x0004) != 0;
                 font.IsStrikethrough = (BitConverter.ToUInt16(record.Data, 2) & 0x0008) != 0;
                 font.ColorIndex = BitConverter.ToUInt16(record.Data, 6);
+                string? wsColor = GetColorFromPalette(font.ColorIndex);
+                font.Color = string.IsNullOrEmpty(wsColor) ? null : wsColor.Replace("#", "");
                 font.Name = System.Text.Encoding.ASCII.GetString(record.Data, 40, record.Data.Length - 40).TrimEnd('\0');
-                
+
                 worksheet.Fonts.Add(font);
             }
         }
@@ -1606,7 +1591,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 font.IsUnderline = (record.Data[10]) != 0;
                 font.IsStrikethrough = (grbit & 0x0008) != 0;
                 font.ColorIndex = BitConverter.ToUInt16(record.Data, 4);
-                
+                string? resolved = GetColorFromPalette(font.ColorIndex);
+                font.Color = string.IsNullOrEmpty(resolved) ? null : resolved.Replace("#", "");
+
                 int nameOffset = 14;
                 if (record.Data.Length > nameOffset)
                 {
