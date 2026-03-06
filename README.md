@@ -36,20 +36,67 @@
 *(To be added when published to NuGet)*
 ```bash
 dotnet add package Nedev.FileConverters.XlsToXlsx
+# core infrastructure required by all converters
+dotnet add package Nedev.FileConverters.Core
 ```
 
 ## 💻 Usage
 
-Converting files is easy – the command‑line tool (included in the repo) and library support single‑file and batch operations:
+This repository contains two deliverables:
 
-* **Single file** – see the example below.
-* **Directory/batch mode** – point the CLI at a folder containing `.xls` files and it will produce `.xlsx` siblings, or call `XlsToXlsxConverter.BatchConvert` from your own code.
+* **`Nedev.FileConverters.XlsToXlsx`** – the core library (DLL) implementing the converter.
+* **`Nedev.FileConverters.XlsToXlsx.Cli`** – a small console application that wraps the library and provides a command‑line interface. This CLI is what can be packaged as a global tool.
 
-Converting a `.xls` file to `.xlsx` takes just a few lines of code:
+### Running the CLI locally
+
+```powershell
+# build and run inside repo
+cd src\Nedev.FileConverters.XlsToXlsx
+dotnet run -- -i input.xls -o output.xlsx
+```
+
+The CLI tool understands the following options:
+
+* `-i|--input <path>` – input file or directory (required)
+* `-o|--output <file>` – output file path (only for single-file conversion)
+* `--dump-colors` – inspect an XLS palette/fonts instead of converting
+* `--version` – display the tool version and exit
+* `--help` – show usage information
+
+If the input path is a directory, all `*.xls` files will be batch-converted.
+
+**Example (file)**
+```powershell
+xls2xlsx -i C:\old.xls -o C:\new.xlsx
+```
+
+**Example (folder)**
+```powershell
+xls2xlsx -i C:\legacy-files
+```
+
+**Inspect colors**
+```powershell
+xls2xlsx -i C:\workbook.xls --dump-colors
+```
+
+### as a global tool
+
+After publishing to NuGet the CLI package can be installed globally:
+```powershell
+dotnet tool install --global Nedev.FileConverters.XlsToXlsx.Cli
+# then run via its command name:
+xls2xlsx -i file.xls
+```
+
+*The conversion API is still available for library consumers; see the example below.*
+* **Core integration** – since this package now implements `IFileConverter` from `Nedev.FileConverters.Core`, you can invoke conversion via the shared `Converter.Convert(...)` helper and discover converters automatically.
+
+Converting a `.xls` file to `.xlsx` takes just a few lines of code. you may use the core helper as shown below:
 
 ```csharp
 using System;
-using Nedev.FileConverters.XlsToXlsx;
+using Nedev.FileConverters;
 
 class Program
 {
@@ -60,11 +107,11 @@ class Program
 
         try
         {
-            // Convert with an optional progress callback
-            XlsToXlsxConverter.Convert(inputFilePath, outputFilePath, (percentage, message) =>
-            {
-                Console.WriteLine($"Progress: {percentage}% - {message}");
-            });
+            // the Core library will locate the Xls -> Xlsx converter automatically
+            using var inStream = File.OpenRead(inputFilePath);
+            using var converted = Converter.Convert(inStream, "xls", "xlsx");
+            using var outStream = File.Create(outputFilePath);
+            converted.CopyTo(outStream);
 
             Console.WriteLine("Conversion completed successfully!");
         }

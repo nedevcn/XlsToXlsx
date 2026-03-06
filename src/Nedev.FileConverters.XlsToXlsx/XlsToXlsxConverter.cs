@@ -1,6 +1,7 @@
 using System.IO;
 using System.Threading.Tasks;
 using Nedev.FileConverters.XlsToXlsx.Exceptions;
+using Nedev.FileConverters.Core;
 
 namespace Nedev.FileConverters.XlsToXlsx
 {
@@ -16,12 +17,30 @@ namespace Nedev.FileConverters.XlsToXlsx
     /// 提供同步和异步方法将旧格式的Excel文件(.xls)转换为新格式(.xlsx)
     /// 支持数据验证、条件格式、图表、样式、图片和VBA等高级功能
     /// </summary>
-    public class XlsToXlsxConverter
+    [FileConverter("xls","xlsx")]
+public class XlsToXlsxConverter : IFileConverter
     {
         /// <summary>
         /// VBA项目大小限制（字节），默认50MB
         /// </summary>
         public static long VbaSizeLimit { get; set; } = 50 * 1024 * 1024;
+
+        // Implementation of IFileConverter from Core package
+        /// <summary>
+        /// Core interface entrypoint. Converts the provided input stream (XLS) to a
+        /// new stream (XLSX) that is returned to the caller. This forwards to the
+        /// existing static helper and resets the position before returning.
+        /// </summary>
+        /// <param name="input">Stream containing .xls data. Caller retains ownership.</param>
+        /// <returns>A new MemoryStream containing the generated .xlsx content.</returns>
+        public Stream Convert(Stream input)
+        {
+            if (input == null) throw new ArgumentNullException(nameof(input));
+            var output = new MemoryStream();
+            Convert(input, output);
+            output.Position = 0;
+            return output;
+        }
 
         /// <summary>
         /// 将XLS文件转换为XLSX文件
