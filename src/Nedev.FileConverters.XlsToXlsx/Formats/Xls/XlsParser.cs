@@ -4,10 +4,10 @@ using System;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
-using Nedev.XlsToXlsx;
-using Nedev.XlsToXlsx.Exceptions;
+using Nedev.FileConverters.XlsToXlsx;
+using Nedev.FileConverters.XlsToXlsx.Exceptions;
 
-namespace Nedev.XlsToXlsx.Formats.Xls
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 {
     public class XlsParser
     {
@@ -146,6 +146,9 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 workbook.NumberFormats = _formats;
                 workbook.Palette = _palette;
 
+                // 7.1 生成全局样式列表并更新单元格的 StyleId
+                BuildWorkbookStyles(workbook);
+
                 // 8. 解析VBA流
                 ParseVbaStream(workbook);
                 Logger.Info("VBA流解析完成");
@@ -178,6 +181,66 @@ namespace Nedev.XlsToXlsx.Formats.Xls
         {
             // 使用Task.Run在后台线程中执行解析，避免阻塞主线程
             return await Task.Run(() => Parse());
+        }
+
+        /// <summary>
+        /// 将各工作表的 XF 转换为全局 Workbook.Styles，并调整单元格 StyleId 为全局索引。
+        /// 此方法确保字体颜色等样式不会丢失。
+        /// </summary>
+        private void BuildWorkbookStyles(Workbook workbook)
+        {
+            // merge palettes and fonts from all sheets so palette lookup works later
+            foreach (var sheet in workbook.Worksheets)
+            {
+                foreach (var kv in sheet.Palette)
+                {
+                    if (!workbook.Palette.ContainsKey(kv.Key))
+                        workbook.Palette[kv.Key] = kv.Value;
+                }
+                foreach (var f in sheet.Fonts)
+                    workbook.Fonts.Add(f);
+            }
+
+            // Determine which XF list to use. Workbook-level XfList is authoritative if present,
+            // otherwise fall back to sheet-specific Xfs (flattened in order).
+            List<Xf> allXfs = new List<Xf>();
+            if (workbook.XfList != null && workbook.XfList.Count > 0)
+            {
+                allXfs.AddRange(workbook.XfList);
+            }
+            else
+            {
+                foreach (var sheet in workbook.Worksheets)
+                {
+                    allXfs.AddRange(sheet.Xfs);
+                }
+            }
+
+            // build global styles from the chosen XF list
+            foreach (var xf in allXfs)
+            {
+                var style = new Style();
+                if (xf.FontIndex < workbook.Fonts.Count)
+                    style.Font = workbook.Fonts[xf.FontIndex];
+                // future: copy other XF properties
+                workbook.Styles.Add(style);
+            }
+
+            // update cell StyleId values so they point into the global list we just built
+            foreach (var sheet in workbook.Worksheets)
+            {
+                foreach (var sheetRow in sheet.Rows)
+                {
+                    foreach (var cell in sheetRow.Cells ?? new List<Cell>())
+                    {
+                        if (!string.IsNullOrEmpty(cell.StyleId) && int.TryParse(cell.StyleId, out int idx))
+                        {
+                            // index already global when using workbook.XfList; no offset needed.
+                            cell.StyleId = idx.ToString();
+                        }
+                    }
+                }
+            }
         }
         
         // ===== 全局流解析 =====
@@ -1073,7 +1136,7 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                 font.IsUnderline = (BitConverter.ToUInt16(data, 2) & 0x0004) != 0;
                 font.IsStrikethrough = (BitConverter.ToUInt16(data, 2) & 0x0008) != 0;
                 font.ColorIndex = BitConverter.ToUInt16(data, 6);
-                string? wsColor = GetColorFromPalette(font.ColorIndex);
+                string? wsColor = GetColorFromPalette(font.ColorIndex, worksheet);
                 font.Color = string.IsNullOrEmpty(wsColor) ? null : wsColor.Replace("#", "");
                 font.Name = System.Text.Encoding.ASCII.GetString(data, 40, data.Length - 40).TrimEnd('\0');
 
@@ -1148,12 +1211,12 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                     border.Top = GetBorderLineStyle((byte)((border1 >> 8) & 0x0F));
                     border.Bottom = GetBorderLineStyle((byte)((border1 >> 12) & 0x0F));
 
-                    border.LeftColor = GetColorFromPalette((int)((border1 >> 16) & 0x7F));
-                    border.RightColor = GetColorFromPalette((int)((border1 >> 23) & 0x7F));
+                    border.LeftColor = GetColorFromPalette((int)((border1 >> 16) & 0x7F), worksheet);
+                    border.RightColor = GetColorFromPalette((int)((border1 >> 23) & 0x7F), worksheet);
 
-                    border.TopColor = GetColorFromPalette((int)(border2 & 0x7F));
-                    border.BottomColor = GetColorFromPalette((int)((border2 >> 7) & 0x7F));
-                    border.DiagonalColor = GetColorFromPalette((int)((border2 >> 14) & 0x7F));
+                    border.TopColor = GetColorFromPalette((int)(border2 & 0x7F), worksheet);
+                    border.BottomColor = GetColorFromPalette((int)((border2 >> 7) & 0x7F), worksheet);
+                    border.DiagonalColor = GetColorFromPalette((int)((border2 >> 14) & 0x7F), worksheet);
                     border.Diagonal = GetBorderLineStyle((byte)((border2 >> 21) & 0x0F));
 
                     // 添加到全局列表并分配索引
@@ -1171,8 +1234,8 @@ namespace Nedev.XlsToXlsx.Formats.Xls
 
                     var fill = new Fill();
                     fill.PatternType = GetPatternType(pattern);
-                    fill.ForegroundColor = GetColorFromPalette(icvFore);
-                    fill.BackgroundColor = GetColorFromPalette(icvBack);
+                    fill.ForegroundColor = GetColorFromPalette(icvFore, worksheet);
+                    fill.BackgroundColor = GetColorFromPalette(icvBack, worksheet);
 
                     _workbook.Fills.Add(fill);
                     xf.FillIndex = _workbook.Fills.Count + 1; // 2-based: 0=none, 1=gray125, 2+=workbook.Fills
@@ -2214,10 +2277,28 @@ namespace Nedev.XlsToXlsx.Formats.Xls
                         if (data.Length > 6)
                         {
                             // 解析富文本格式（使用完整 data 以支持 CONTINUE）
-                            cell.RichText = ParseRichText(data, 6);
+                            var reader = new BiffStringReader(record, 6);
+                            var (txt, runInfos) = reader.ReadRichTextString();
+                            cell.Value = txt;
                             cell.DataType = "inlineStr";
-                            // 同时设置Value为纯文本，确保兼容性
-                            cell.Value = string.Join("", cell.RichText.Select(r => r.Text));
+                            if (runInfos != null && runInfos.Count > 0)
+                            {
+                                cell.RichText = new List<RichTextRun>();
+                                for (int ri = 0; ri < runInfos.Count; ri++)
+                                {
+                                    int start = runInfos[ri].CharPos;
+                                    int end = (ri + 1 < runInfos.Count) ? runInfos[ri + 1].CharPos : txt.Length;
+                                    if (start < 0) start = 0;
+                                    if (end > txt.Length) end = txt.Length;
+                                    string runText = txt.Substring(start, end - start);
+                                    var run = new RichTextRun
+                                    {
+                                        Text = runText,
+                                        Font = GetFontByIndex(runInfos[ri].FontIndex)
+                                    };
+                                    cell.RichText.Add(run);
+                                }
+                            }
                         }
                         break;
                     case (ushort)BiffRecordType.CELL_LABELSST:
@@ -2777,10 +2858,14 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             }
         }
 
-        private string? GetColorFromPalette(int colorIndex)
+        private string? GetColorFromPalette(int colorIndex, Worksheet? sheet = null)
         {
             if (colorIndex == 64) return null; // System Foreground
             if (colorIndex == 65) return null; // System Background
+
+            // sheet-level palette overrides workbook/global
+            if (sheet != null && sheet.Palette.TryGetValue(colorIndex, out string? sheetColor))
+                return sheetColor.Replace("#", "");
 
             if (_workbook.Palette.TryGetValue(colorIndex, out string? color))
                 return color.Replace("#", "");

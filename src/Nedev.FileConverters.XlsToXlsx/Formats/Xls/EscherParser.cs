@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Nedev.XlsToXlsx;
+using Nedev.FileConverters.XlsToXlsx;
 
-namespace Nedev.XlsToXlsx.Formats.Xls.Escher
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls.Escher
 {
     public class EscherRecord
     {

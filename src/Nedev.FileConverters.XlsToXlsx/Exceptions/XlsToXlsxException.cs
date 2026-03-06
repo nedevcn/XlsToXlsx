@@ -1,7 +1,7 @@
 using System;
 
 
-namespace Nedev.XlsToXlsx.Exceptions
+namespace Nedev.FileConverters.XlsToXlsx.Exceptions
 {
     /// <summary>
     /// XLS到XLSX转换异常类

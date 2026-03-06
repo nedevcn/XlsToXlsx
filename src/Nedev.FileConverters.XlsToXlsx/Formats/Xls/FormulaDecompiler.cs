@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
-using Nedev.XlsToXlsx;
+using Nedev.FileConverters.XlsToXlsx;
 
-namespace Nedev.XlsToXlsx.Formats.Xls
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 {
     /// <summary>
     /// A simple formula decompiler for translating BIFF8 Formula Ptgs (Parsed Tokens)

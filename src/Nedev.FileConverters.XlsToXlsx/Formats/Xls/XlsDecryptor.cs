@@ -1,9 +1,9 @@
 using System;
 using System.Security.Cryptography;
 using System.Text;
-using Nedev.XlsToXlsx.Exceptions;
+using Nedev.FileConverters.XlsToXlsx.Exceptions;
 
-namespace Nedev.XlsToXlsx.Formats.Xls
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 {
     /// <summary>
     /// 提供对加密的 XLS (BIFF8) 记录进行处理的解密工具

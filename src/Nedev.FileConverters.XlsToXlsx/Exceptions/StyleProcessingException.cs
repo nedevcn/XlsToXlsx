@@ -1,6 +1,6 @@
 using System;
 
-namespace Nedev.XlsToXlsx.Exceptions
+namespace Nedev.FileConverters.XlsToXlsx.Exceptions
 {
     /// <summary>
     /// 处理样式相关的异常类

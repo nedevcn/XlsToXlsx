@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Nedev.XlsToXlsx
+namespace Nedev.FileConverters.XlsToXlsx
 {
     /// <summary>
     /// 工作簿类，包含Excel文件的所有内容

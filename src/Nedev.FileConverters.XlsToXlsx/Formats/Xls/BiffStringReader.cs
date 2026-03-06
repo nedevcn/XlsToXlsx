@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 
-namespace Nedev.XlsToXlsx.Formats.Xls
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 {
     /// <summary>
     /// 处理跨越多个 CONTINUE (0x003C) 记录的 BIFF 字符串读取
@@ -123,23 +123,95 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             return sb.ToString();
         }
 
-        private bool IsEOF()
+        /// <summary>
+        /// Read a rich-text string and capture formatting runs (character offset and font index).
+        /// Returns tuple of text and list of runs.
+        /// </summary>
+        public (string Text, List<(int CharPos, short FontIndex)> Runs) ReadRichTextString()
         {
-            return _chunkIndex > _record.Continues.Count || 
-                   (_chunkIndex == _record.Continues.Count && _chunkOffset >= GetCurrentChunkLength());
-        }
+            var runs = new List<(int, short)>();
+            if (IsEOF()) return (string.Empty, runs);
 
-        private byte[] GetCurrentChunk()
-        {
-            if (_chunkIndex == 0)
-                return _record.Data ?? Array.Empty<byte>();
-            
-            return _record.Continues[_chunkIndex - 1];
-        }
+            // char count
+            ushort charCount = ReadUInt16();
+            if (charCount == 0) return (string.Empty, runs);
 
-        private int GetCurrentChunkLength()
-        {
-            return GetCurrentChunk().Length;
+            byte option = ReadByte();
+            bool isUnicode = (option & 0x01) != 0;
+            bool hasRichTextFlag = (option & 0x08) != 0;
+            bool hasExt = (option & 0x04) != 0;
+
+            int runCount2 = 0;
+            if (hasRichTextFlag)
+            {
+                runCount2 = ReadUInt16();
+            }
+            int extSize2 = 0;
+            if (hasExt)
+            {
+                extSize2 = ReadInt32();
+            }
+
+            // read the characters exactly as in ReadString
+            StringBuilder sb = new StringBuilder(charCount);
+            int charsRemaining = charCount;
+            while (charsRemaining > 0)
+            {
+                if (_chunkOffset >= GetCurrentChunkLength())
+                {
+                    if (MoveToNextChunk())
+                    {
+                        byte newOption = ReadByte();
+                        isUnicode = (newOption & 0x01) != 0;
+                    }
+                    else
+                        break;
+                }
+                int availableBytes = GetCurrentChunkLength() - _chunkOffset;
+                int bytesPerChar = isUnicode ? 2 : 1;
+                int charsInThisChunk = availableBytes / bytesPerChar;
+                int c = Math.Min(charsRemaining, charsInThisChunk);
+                if (c > 0)
+                {
+                    byte[] chunkArray = GetCurrentChunk();
+                    if (isUnicode)
+                    {
+                        sb.Append(Encoding.Unicode.GetString(chunkArray, _chunkOffset, c * 2));
+                        _chunkOffset += c * 2;
+                    }
+                    else
+                    {
+                        sb.Append(Encoding.ASCII.GetString(chunkArray, _chunkOffset, c));
+                        _chunkOffset += c;
+                    }
+                    charsRemaining -= c;
+                }
+                else
+                {
+                    if (availableBytes > 0)
+                        _chunkOffset += availableBytes;
+                }
+            }
+
+            // now read formatting runs if any
+            if (hasRichTextFlag && runCount2 > 0)
+            {
+                for (int i = 0; i < runCount2; i++)
+                {
+                    int charPos = ReadUInt16();
+                    short fontIndex = ReadInt16();
+                    runs.Add((charPos, fontIndex));
+                }
+            }
+
+            // skip extended data
+            if (hasExt && extSize2 > 0)
+            {
+                for (int i = 0; i < extSize2; i++)
+                    ReadByte();
+            }
+
+            return (sb.ToString(), runs);
         }
 
         private bool MoveToNextChunk()
@@ -176,6 +248,32 @@ namespace Nedev.XlsToXlsx.Formats.Xls
             byte b3 = ReadByte();
             byte b4 = ReadByte();
             return b1 | (b2 << 8) | (b3 << 16) | (b4 << 24);
+        }
+
+        private bool IsEOF()
+        {
+            return _chunkIndex > _record.Continues.Count ||
+                   (_chunkIndex == _record.Continues.Count && _chunkOffset >= GetCurrentChunkLength());
+        }
+
+        private int GetCurrentChunkLength()
+        {
+            if (_chunkIndex == 0)
+                return _record.Data?.Length ?? 0;
+            return _record.Continues[_chunkIndex - 1]?.Length ?? 0;
+        }
+
+        private byte[] GetCurrentChunk()
+        {
+            if (_chunkIndex == 0)
+                return _record.Data ?? Array.Empty<byte>();
+            return _record.Continues[_chunkIndex - 1];
+        }
+
+        private short ReadInt16()
+        {
+            ushort u = ReadUInt16();
+            return (short)u;
         }
     }
 }

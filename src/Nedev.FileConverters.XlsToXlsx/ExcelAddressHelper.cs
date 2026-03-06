@@ -1,6 +1,6 @@
 using System;
 
-namespace Nedev.XlsToXlsx
+namespace Nedev.FileConverters.XlsToXlsx
 {
     /// <summary>
     /// 公共的 Excel 地址/列号 工具函数，集中管理列索引与列字母之间的转换逻辑。

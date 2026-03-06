@@ -1,6 +1,6 @@
-# Nedev.XlsToXlsx
+# Nedev.FileConverters.XlsToXlsx
 
-**Nedev.XlsToXlsx** is a standalone, lightweight, and fast .NET library designed to convert legacy Microsoft Excel files (`.xls` / BIFF8 format) into the modern OpenXML format (`.xlsx`). It performs this conversion entirely in memory and **does not require Microsoft Office or Excel Interop** to be installed.
+**Nedev.FileConverters.XlsToXlsx** is a standalone, lightweight, and fast .NET library designed to convert legacy Microsoft Excel files (`.xls` / BIFF8 format) into the modern OpenXML format (`.xlsx`). It performs this conversion entirely in memory and **does not require Microsoft Office or Excel Interop** to be installed.
 
 ## 🚀 Features
 
@@ -9,7 +9,8 @@
 - **Cell Data**: Extracts formulas, numbers, strings (including Shared String Table), booleans, and errors.
 - **Formatting & Styles**: Converts fonts (size, color, bold, italic), cell fills/patterns, borders, and alignment.
 - **Worksheet Layout**: Preserves row heights, column widths, fixed/frozen panes, and hidden rows/cols.
-- **Merged Cells**: Accurately maps merged cell ranges.
+- **Merged Cells**: Accurately maps merged cell ranges.  
+  *Overlapping or nested ranges are now filtered in parser order: the first merge is kept and any later range that intersects it is discarded.  This avoids Excel warnings while preventing a single huge union cell from appearing in the output.*
 - **Hyperlinks**: Preserves cell hyperlinks (external URLs, local files, and email addresses).
 - **Comments/Notes**: Extracts basic cell notes/comments.
 - **Data Validation**: Retains basic data validation rules (dropdowns, number constraints).
@@ -34,16 +35,21 @@
 
 *(To be added when published to NuGet)*
 ```bash
-dotnet add package Nedev.XlsToXlsx
+dotnet add package Nedev.FileConverters.XlsToXlsx
 ```
 
 ## 💻 Usage
+
+Converting files is easy – the command‑line tool (included in the repo) and library support single‑file and batch operations:
+
+* **Single file** – see the example below.
+* **Directory/batch mode** – point the CLI at a folder containing `.xls` files and it will produce `.xlsx` siblings, or call `XlsToXlsxConverter.BatchConvert` from your own code.
 
 Converting a `.xls` file to `.xlsx` takes just a few lines of code:
 
 ```csharp
 using System;
-using Nedev.XlsToXlsx;
+using Nedev.FileConverters.XlsToXlsx;
 
 class Program
 {

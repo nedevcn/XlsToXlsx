@@ -4,10 +4,10 @@ using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Xml;
-using Nedev.XlsToXlsx;
-using Nedev.XlsToXlsx.Exceptions;
+using Nedev.FileConverters.XlsToXlsx;
+using Nedev.FileConverters.XlsToXlsx.Exceptions;
 
-namespace Nedev.XlsToXlsx.Formats.Xlsx
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
 {
     public class XlsxGenerator
     {
@@ -499,7 +499,7 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 writer.WriteAttributeString("xmlns", "xsi", null, xsiNs);
 
                 string creator = string.IsNullOrEmpty(workbook.Author)
-                    ? "Nedev.XlsToXlsx"
+                    ? "Nedev.FileConverters.XlsToXlsx"
                     : workbook.Author!;
                 writer.WriteElementString("dc", "creator", dcNs, creator);
 
@@ -1091,7 +1091,10 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                                         if (!string.IsNullOrEmpty(run.Font.Color))
                                         {
                                             writer.WriteStartElement("color");
-                                            writer.WriteAttributeString("rgb", run.Font.Color);
+                                            string col = run.Font.Color.Replace("#", "").Trim();
+                                            if (col.Length == 6) col = "FF" + col;
+                                            else if (col.Length > 8) col = col.Substring(col.Length - 8);
+                                            writer.WriteAttributeString("rgb", col);
                                             writer.WriteEndElement();
                                         }
                                         writer.WriteEndElement();
@@ -1159,20 +1162,54 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                 // 写入合并单元格信息
                 if (worksheet.MergeCells != null && worksheet.MergeCells.Count > 0)
                 {
-                    writer.WriteStartElement("mergeCells");
-                    writer.WriteAttributeString("count", worksheet.MergeCells.Count.ToString());
-                    
-                    foreach (var mergeCell in worksheet.MergeCells)
+                    // Excel will complain when merge ranges intersect; the safest
+                    // approach is to retain the first-recorded range and drop any
+                    // subsequent range that overlaps it at all.  That mirrors Excel's
+                    // behavior of discarding offending merges on load and avoids
+                    // producing a gigantic union box.
+                    var merges = worksheet.MergeCells
+                        .Where(m => m != null && m.StartRow <= m.EndRow && m.StartColumn <= m.EndColumn)
+                        .ToList();
+
+                    List<MergeCell> filtered = new List<MergeCell>();
+                    foreach (var m in merges)
                     {
-                        if (mergeCell == null) continue;
-                        writer.WriteStartElement("mergeCell");
-                        string refValue = GetCellReference(mergeCell.StartRow, mergeCell.StartColumn) + ":" + 
-                                         GetCellReference(mergeCell.EndRow, mergeCell.EndColumn);
-                        writer.WriteAttributeString("ref", refValue);
+                        bool intersects = filtered.Any(f =>
+                            !(f.EndRow < m.StartRow || m.EndRow < f.StartRow ||
+                              f.EndColumn < m.StartColumn || m.EndColumn < f.StartColumn));
+                        if (!intersects)
+                        {
+                            filtered.Add(new MergeCell
+                            {
+                                StartRow = m.StartRow,
+                                StartColumn = m.StartColumn,
+                                EndRow = m.EndRow,
+                                EndColumn = m.EndColumn
+                            });
+                        }
+                        else
+                        {
+                            // skip this merge; it conflicts with an earlier one
+                        }
+                    }
+
+                    if (filtered.Count > 0)
+                    {
+                        writer.WriteStartElement("mergeCells");
+                        writer.WriteAttributeString("count", filtered.Count.ToString());
+
+                        foreach (var mergeCell in filtered)
+                        {
+                            if (mergeCell == null) continue;
+                            writer.WriteStartElement("mergeCell");
+                            string refValue = GetCellReference(mergeCell.StartRow, mergeCell.StartColumn) + ":" + 
+                                             GetCellReference(mergeCell.EndRow, mergeCell.EndColumn);
+                            writer.WriteAttributeString("ref", refValue);
+                            writer.WriteEndElement();
+                        }
+
                         writer.WriteEndElement();
                     }
-                    
-                    writer.WriteEndElement();
                 }
                 
                 // 自动筛选
@@ -1874,11 +1911,16 @@ namespace Nedev.XlsToXlsx.Formats.Xlsx
                             writer.WriteEndElement();
                         }
                         
-                        // 字体颜色 (color)：OOXML rgb 为 6 或 8 位十六进制，不含 #
+                        // 字体颜色 (color)：OOXML rgb 使用 8 位 ARGB 形式（前两位 alpha）。
                         writer.WriteStartElement("color");
                         string fontRgb = (font.Color ?? "").Replace("#", "").Trim();
                         if (fontRgb.Length < 6) fontRgb = "000000";
-                        writer.WriteAttributeString("rgb", fontRgb.Length <= 6 ? fontRgb : fontRgb.Substring(0, 6));
+                        // ensure we have exactly 8 digits, default alpha FF
+                        if (fontRgb.Length == 6)
+                            fontRgb = "FF" + fontRgb;
+                        else if (fontRgb.Length > 8)
+                            fontRgb = fontRgb.Substring(fontRgb.Length - 8); // keep last 8 if somehow longer
+                        writer.WriteAttributeString("rgb", fontRgb);
                         writer.WriteEndElement();
                         
                         // 字体名称 (name)

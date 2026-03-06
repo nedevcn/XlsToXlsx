@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-namespace Nedev.XlsToXlsx.Formats.Xls
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 {
     /// <summary>
     /// OLE Compound Binary File 格式解析器。

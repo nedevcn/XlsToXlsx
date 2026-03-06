@@ -5,7 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RootNamespace>Nedev.XlsToXlsx</RootNamespace>
+    <RootNamespace>Nedev.FileConverters.XlsToXlsx</RootNamespace>
   </PropertyGroup>
 
 </Project>

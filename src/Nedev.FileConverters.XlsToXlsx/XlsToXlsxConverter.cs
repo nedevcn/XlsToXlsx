@@ -1,8 +1,8 @@
 using System.IO;
 using System.Threading.Tasks;
-using Nedev.XlsToXlsx.Exceptions;
+using Nedev.FileConverters.XlsToXlsx.Exceptions;
 
-namespace Nedev.XlsToXlsx
+namespace Nedev.FileConverters.XlsToXlsx
 {
     /// <summary>
     /// 进度更新委托，用于在转换过程中提供实时进度信息

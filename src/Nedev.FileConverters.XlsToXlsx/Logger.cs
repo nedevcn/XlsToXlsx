@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace Nedev.XlsToXlsx
+namespace Nedev.FileConverters.XlsToXlsx
 {
     public static class Logger
     {

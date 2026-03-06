@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace Nedev.XlsToXlsx.Formats.Xls
+namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 {
     public class BiffRecord
     {
