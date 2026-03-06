@@ -3,10 +3,13 @@
   <ItemGroup>
     <ProjectReference Include="..\Nedev.FileConverters.XlsToXlsx\Nedev.FileConverters.XlsToXlsx.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -21,6 +24,7 @@
     <RepositoryUrl>https://github.com/nedevcn/Nedev.FileConverters.XlsToXlsx.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
 
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>xls2xlsx</ToolCommandName>

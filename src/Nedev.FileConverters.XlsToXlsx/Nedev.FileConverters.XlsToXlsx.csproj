@@ -2,10 +2,11 @@
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net8.0;netstandard2.1</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Nedev.FileConverters.XlsToXlsx</RootNamespace>
+    <LangVersion>10.0</LangVersion>
     <!-- manage assembly attributes ourselves to avoid duplicate errors -->
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
 
@@ -15,6 +16,7 @@
     <Authors>nedev</Authors>
     <Company>nedev</Company>
     <Description>Converts legacy .xls Excel files to .xlsx using a lightweight in-memory parser.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/nedevcn/Nedev.FileConverters.XlsToXlsx</PackageProjectUrl>
     <RepositoryUrl>https://github.com/nedevcn/Nedev.FileConverters.XlsToXlsx.git</RepositoryUrl>
@@ -24,6 +26,10 @@
 
   <ItemGroup>
     <PackageReference Include="Nedev.FileConverters.Core" Version="0.1.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- README lives at repo root; reference via relative path so pack can find it -->
+    <None Include="..\..\README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
 </Project>
