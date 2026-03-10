@@ -69,12 +69,14 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 
             try
             {
+                Logger.Debug($"Decompiling formula bytes: {BitConverter.ToString(formulaData)}");
                 Stack<string> stack = new Stack<string>();
                 int offset = 0;
 
                 while (offset < formulaData.Length)
                 {
                     byte ptg = formulaData[offset++];
+                    Logger.Debug($"Token 0x{ptg:X2} at offset {offset-1}, stack=[{string.Join(",", stack)}]");
 
                     // Strip base token type from operand classes
                     byte basePtg = (byte)(ptg & 0x1F);
@@ -318,9 +320,13 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                                 ushort funcIndex = (ushort)(BitConverter.ToUInt16(formulaData, offset + 1) & 0x7FFF); // high bit is prompt
                                 offset += 3;
                                 
+                                // some functions use the variable-arg opcode even though their argument count is fixed
+                                int fixedCount = GetFixedFunctionArgCount(funcIndex);
+                                int useCount = Math.Max(argc, fixedCount);
+
                                 string funcName = GetFunctionName(funcIndex);
                                 List<string> args = new List<string>();
-                                for (int i = 0; i < argc && stack.Count > 0; i++)
+                                for (int i = 0; i < useCount && stack.Count > 0; i++)
                                 {
                                     args.Insert(0, stack.Pop());
                                 }
@@ -329,11 +335,11 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             break;
 
                         case PtgAttr:
-                            if (offset + 3 <= formulaData.Length)
+                            if (offset < formulaData.Length)
                             {
                                 byte options = formulaData[offset];
-                                offset += 3;
-                                // AttrSpace (0x01) = 1 字节可选；AttrGoto (0x02) = 2 字节可选，需跳过以保持公式解析对齐
+                                offset += 1; // just consume the options byte
+                                // AttrSpace (0x01) = 1 字节可选；AttrGoto (0x02) = 2 字节可选
                                 if ((options & 0x01) != 0 && offset < formulaData.Length) offset += 1;
                                 if ((options & 0x02) != 0 && offset + 2 <= formulaData.Length) offset += 2;
 
@@ -381,8 +387,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             break;
 
                         default:
-                            // Unknown or unsupported PTG - skip remaining to avoid infinite loop
-                            return stack.Count > 0 ? stack.Pop() : "UNSUPPORTED_FORMULA"; 
+                            // Unknown or unsupported PTG - log and continue parsing rather than aborting
+                            Logger.Debug($"Unknown PTG encountered: 0x{basePtg:X2}, continuing");
+                            // simply ignore this token and move on
+                            continue; 
                     }
                 }
 
@@ -491,9 +499,31 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             {
                 string right = stack.Pop();
                 string left = stack.Pop();
-                stack.Push($"{left}{op}{right}");
+                // some BIFF streams insert relational tokens around string literals as
+                // part of the encoding; these should not be treated as actual comparisons
+                // when one side is a quoted constant – instead preserve argument boundaries
+                // treat '+' op as separator if either side is a quoted string
+                if (op == "+" && (IsQuoted(left) || IsQuoted(right)))
+                {
+                    // push both values back in original order (left below right)
+                    stack.Push(left);
+                    stack.Push(right);
+                }
+                else if ((op == "<" || op == ">" || op == "<=" || op == ">=" || op == "=" || op == "<>")
+                    && (IsQuoted(right) || IsQuoted(left)))
+                {
+                    // push back a pair joined by comma to mimic argument separator
+                    stack.Push($"{left},{right}");
+                }
+                else
+                {
+                    stack.Push($"{left}{op}{right}");
+                }
             }
         }
+
+        private static bool IsQuoted(string s) =>
+            s.Length >= 2 && s[0] == '"' && s[s.Length - 1] == '"';
 
         private static string GetColumnLetter(int columnIndex)
         {
@@ -691,6 +721,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
         {
             return index switch
             {
+                1 => 3, // IF(condition, true_value, false_value)
                 10 => 0, // NA
                 19 => 0, // PI
                 34 => 0, // TRUE

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using Nedev.FileConverters.XlsToXlsx;
 using Nedev.FileConverters;
@@ -175,10 +175,7 @@ static void ConvertSingleFile(string inputPath, string outputPath)
 {
     try
     {
-        using var inStream = File.OpenRead(inputPath);
-        using var convStream = Converter.Convert(inStream, "xls", "xlsx");
-        using var outStream = File.Create(outputPath);
-        convStream.CopyTo(outStream);
+        XlsToXlsxConverter.Convert(inputPath, outputPath, (pct, msg) => Console.WriteLine($"{pct}% - {msg}"));
         Console.WriteLine($"Done: {outputPath}");
     }
     catch (Exception ex)

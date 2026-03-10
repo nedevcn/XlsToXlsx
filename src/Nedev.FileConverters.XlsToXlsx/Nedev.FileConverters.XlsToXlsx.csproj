@@ -9,6 +9,7 @@
     <LangVersion>10.0</LangVersion>
     <!-- manage assembly attributes ourselves to avoid duplicate errors -->
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
 
     <!-- package metadata -->
     <PackageId>Nedev.FileConverters.XlsToXlsx</PackageId>
@@ -26,6 +27,11 @@
 
   <ItemGroup>
     <PackageReference Include="Nedev.FileConverters.Core" Version="0.1.0" />
+    <PackageReference Include="NPOI" Version="2.6.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="bin\**\*.cs;obj\**\*.cs" />
+    <None Remove="bin\**;obj\**" />
   </ItemGroup>
   <ItemGroup>
     <!-- README lives at repo root; reference via relative path so pack can find it -->

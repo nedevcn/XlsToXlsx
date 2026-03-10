@@ -189,7 +189,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
         /// </summary>
         private void BuildWorkbookStyles(Workbook workbook)
         {
-            // merge palettes and fonts from all sheets so palette lookup works later
+            // merge palettes from all sheets so palette lookup works later
             foreach (var sheet in workbook.Worksheets)
             {
                 foreach (var kv in sheet.Palette)
@@ -197,8 +197,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                     if (!workbook.Palette.ContainsKey(kv.Key))
                         workbook.Palette[kv.Key] = kv.Value;
                 }
-                foreach (var f in sheet.Fonts)
-                    workbook.Fonts.Add(f);
             }
 
             // Determine which XF list to use. Workbook-level XfList is authoritative if present,
@@ -220,8 +218,9 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             foreach (var xf in allXfs)
             {
                 var style = new Style();
-                if (xf.FontIndex < workbook.Fonts.Count)
-                    style.Font = workbook.Fonts[xf.FontIndex];
+                int fontIndex = NormalizeBiffFontIndex(xf.FontIndex);
+                if (fontIndex >= 0 && fontIndex < workbook.Fonts.Count)
+                    style.Font = workbook.Fonts[fontIndex];
                 // future: copy other XF properties
                 workbook.Styles.Add(style);
             }
@@ -241,6 +240,16 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                     }
                 }
             }
+        }
+
+        private static int NormalizeBiffFontIndex(int fontIndex)
+        {
+            if (fontIndex < 0)
+                return 0;
+
+            // BIFF reserves font slot 4, so all font indices after 4 are shifted by one
+            // relative to the FONT record sequence we store in workbook.Fonts.
+            return fontIndex > 4 ? fontIndex - 1 : fontIndex;
         }
         
         // ===== 全局流解析 =====
@@ -2367,7 +2376,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                                 {
                                     byte[] ptgs = new byte[formulaLength];
                                     Array.Copy(data, 22, ptgs, 0, formulaLength);
+                                    // debug: log token bytes for formula cells
+                                    Logger.Info($"Formula PTGs raw (len={formulaLength}): {BitConverter.ToString(ptgs)}");
                                     string formula = FormulaDecompiler.Decompile(ptgs, _workbook);
+                                    Logger.Info($"Decompiled formula -> {formula}");
                                     
                                     cell.Formula = formula;
                                     

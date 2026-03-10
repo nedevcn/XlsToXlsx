@@ -4,6 +4,10 @@
     <ProjectReference Include="..\Nedev.FileConverters.XlsToXlsx\Nedev.FileConverters.XlsToXlsx.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Remove="bin\**\*.cs;obj\**\*.cs" />
+    <None Remove="bin\**;obj\**" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 

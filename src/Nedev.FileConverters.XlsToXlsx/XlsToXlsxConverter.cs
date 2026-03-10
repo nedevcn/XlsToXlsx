@@ -2,6 +2,7 @@ using System.IO;
 using System.Threading.Tasks;
 using Nedev.FileConverters.XlsToXlsx.Exceptions;
 using Nedev.FileConverters.Core;
+using Nedev.FileConverters.XlsToXlsx.Formats.Xls;
 
 namespace Nedev.FileConverters.XlsToXlsx
 {
@@ -220,22 +221,48 @@ public class XlsToXlsxConverter : IFileConverter
         /// <param name="vbaSizeLimit">VBA项目大小限制（字节），默认使用全局设置</param>
         public static void Convert(Stream inputStream, Stream outputStream, ProgressUpdateHandler? progressUpdate = null, long? vbaSizeLimit = null)
         {
-            progressUpdate?.Invoke(0, "开始解析XLS文件");
-            
-            // 解析XLS文件
-            var xlsParser = new Formats.Xls.XlsParser(inputStream);
-            xlsParser.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
-            var workbook = xlsParser.Parse();
-            
-            progressUpdate?.Invoke(50, "XLS文件解析完成，开始生成XLSX文件");
+            MemoryStream? ownedInputCopy = null;
+            Stream workingInput = inputStream;
 
-            // 生成XLSX文件
-            var xlsxGenerator = new Formats.Xlsx.XlsxGenerator(outputStream);
-            xlsxGenerator.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
-            xlsxGenerator.Generate(workbook);
-            outputStream.Flush();
-            
-            progressUpdate?.Invoke(100, "XLSX文件生成完成");
+            if (!workingInput.CanSeek)
+            {
+                ownedInputCopy = new MemoryStream();
+                inputStream.CopyTo(ownedInputCopy);
+                ownedInputCopy.Position = 0;
+                workingInput = ownedInputCopy;
+            }
+            else if (workingInput.Position != 0)
+            {
+                workingInput.Position = 0;
+            }
+
+            progressUpdate?.Invoke(0, "开始解析XLS文件");
+
+            try
+            {
+                var xlsParser = new Formats.Xls.XlsParser(workingInput);
+                xlsParser.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
+                var workbook = xlsParser.Parse();
+
+                if (workingInput.CanSeek)
+                {
+                    workingInput.Position = 0;
+                    NpoiStylePatcher.Apply(workingInput, workbook);
+                }
+
+                progressUpdate?.Invoke(50, "XLS文件解析完成，开始生成XLSX文件");
+
+                var xlsxGenerator = new Formats.Xlsx.XlsxGenerator(outputStream);
+                xlsxGenerator.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
+                xlsxGenerator.Generate(workbook);
+                outputStream.Flush();
+
+                progressUpdate?.Invoke(100, "XLSX文件生成完成");
+            }
+            finally
+            {
+                ownedInputCopy?.Dispose();
+            }
         }
 
         /// <summary>
@@ -248,22 +275,48 @@ public class XlsToXlsxConverter : IFileConverter
         /// <returns>异步任务</returns>
         public static async Task ConvertAsync(Stream inputStream, Stream outputStream, ProgressUpdateHandler? progressUpdate = null, long? vbaSizeLimit = null)
         {
-            progressUpdate?.Invoke(0, "开始解析XLS文件");
-            
-            // 解析XLS文件
-            var xlsParser = new Formats.Xls.XlsParser(inputStream);
-            xlsParser.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
-            var workbook = await xlsParser.ParseAsync();
-            
-            progressUpdate?.Invoke(50, "XLS文件解析完成，开始生成XLSX文件");
+            MemoryStream? ownedInputCopy = null;
+            Stream workingInput = inputStream;
 
-            // 生成XLSX文件
-            var xlsxGenerator = new Formats.Xlsx.XlsxGenerator(outputStream);
-            xlsxGenerator.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
-            await xlsxGenerator.GenerateAsync(workbook);
-            await outputStream.FlushAsync();
-            
-            progressUpdate?.Invoke(100, "XLSX文件生成完成");
+            if (!workingInput.CanSeek)
+            {
+                ownedInputCopy = new MemoryStream();
+                await inputStream.CopyToAsync(ownedInputCopy);
+                ownedInputCopy.Position = 0;
+                workingInput = ownedInputCopy;
+            }
+            else if (workingInput.Position != 0)
+            {
+                workingInput.Position = 0;
+            }
+
+            progressUpdate?.Invoke(0, "开始解析XLS文件");
+
+            try
+            {
+                var xlsParser = new Formats.Xls.XlsParser(workingInput);
+                xlsParser.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
+                var workbook = await xlsParser.ParseAsync();
+
+                if (workingInput.CanSeek)
+                {
+                    workingInput.Position = 0;
+                    NpoiStylePatcher.Apply(workingInput, workbook);
+                }
+
+                progressUpdate?.Invoke(50, "XLS文件解析完成，开始生成XLSX文件");
+
+                var xlsxGenerator = new Formats.Xlsx.XlsxGenerator(outputStream);
+                xlsxGenerator.VbaSizeLimit = vbaSizeLimit ?? VbaSizeLimit;
+                await xlsxGenerator.GenerateAsync(workbook);
+                await outputStream.FlushAsync();
+
+                progressUpdate?.Invoke(100, "XLSX文件生成完成");
+            }
+            finally
+            {
+                ownedInputCopy?.Dispose();
+            }
         }
 
         /// <summary>

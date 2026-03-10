@@ -120,6 +120,30 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
             return false;
         }
 
+        private static int NormalizeBiffFontIndex(int fontIndex)
+        {
+            if (fontIndex < 0)
+                return 0;
+
+            return fontIndex > 4 ? fontIndex - 1 : fontIndex;
+        }
+
+        private static string? NormalizeArgb(string? color)
+        {
+            if (string.IsNullOrWhiteSpace(color))
+                return null;
+
+            string value = color.Replace("#", "").Trim();
+            if (value.Length == 6)
+                return ("FF" + value).ToUpperInvariant();
+            if (value.Length == 8)
+                return value.ToUpperInvariant();
+            if (value.Length > 8)
+                return value.Substring(value.Length - 8).ToUpperInvariant();
+
+            return null;
+        }
+
         public void Generate(Workbook workbook)
         {
             // 验证workbook对象
@@ -1012,6 +1036,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                             writer.WriteAttributeString("r", GetCellReference(row.RowIndex, cell.ColumnIndex));
 
                             bool isDateCell = cell.Value is DateTime;
+                            bool hasFormula = !string.IsNullOrEmpty(cell.Formula) || cell.IsArrayFormula;
                             
                             // 数组公式：t="array" 且 ref 为范围
                             if (cell.IsArrayFormula && !string.IsNullOrEmpty(cell.ArrayRef))
@@ -1019,10 +1044,15 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                                 writer.WriteAttributeString("t", "array");
                                 writer.WriteAttributeString("ref", cell.ArrayRef);
                             }
-                            // t 属性：日期单元格使用数值序列（不使用 t=\"d\"），避免 Sem_CellValue 错误
-                            else if (!string.IsNullOrEmpty(cell.DataType) && !isDateCell)
+                            // 如果单元格包含公式（即便缓存结果为错误），跳过设置常规 t 属性
+                            else if (!hasFormula)
                             {
-                                writer.WriteAttributeString("t", cell.DataType);
+                                // t 属性：日期单元格使用数值序列（不使用 t="d"），避免 Sem_CellValue 错误
+                                // 修复: 避免无效的 t="f" 类型（parser 可能在没有实际公式的情况下设置 DataType="f").
+                                if (!string.IsNullOrEmpty(cell.DataType) && !isDateCell && cell.DataType != "f")
+                                {
+                                    writer.WriteAttributeString("t", cell.DataType);
+                                }
                             }
                             
                             // 样式ID：优先用单元格的 StyleId，否则用行的默认 XF（如整行背景）
@@ -1036,18 +1066,20 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                             if (styleToUse.HasValue)
                                 writer.WriteAttributeString("s", Math.Clamp(styleToUse.Value, 0, maxStyleId).ToString());
                             
-                            // 处理公式（含数组公式）
-                            if (cell.DataType == "f" || cell.IsArrayFormula)
+                            // 处理公式（含数组公式）。任何有 Formula 字段的单元格都应写出公式
+                            if (hasFormula)
                             {
                                 writer.WriteStartElement("f");
                                 writer.WriteString(cell.Formula ?? "");
                                 writer.WriteEndElement();
-                                writer.WriteStartElement("v");
+
+                                // 将缓存值写入 <v> 以便 Excel 在打开时可立即显示
                                 if (cell.Value != null)
                                 {
+                                    writer.WriteStartElement("v");
                                     writer.WriteString(cell.Value.ToString() ?? "");
+                                    writer.WriteEndElement();
                                 }
-                                writer.WriteEndElement();
                             }
                             else if (cell.RichText != null && cell.RichText.Count > 0)
                             {
@@ -1811,48 +1843,17 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                     
                     // 字体
             writer.WriteStartElement("fonts");
-            int fontCount = 0;
             List<Font> fonts = new List<Font>();
-            
-            // 优先添加从XLS文件解析的全局字体
+
+            // Keep workbook font order stable so BIFF XF font indices can be mapped predictably.
             foreach (var font in workbook.Fonts ?? Enumerable.Empty<Font>())
-            {
-                if (!fonts.Any(f => 
-                    f.Name == font.Name && 
-                    (f.Size ?? (font.Height / 20.0)) == (font.Size ?? (font.Height / 20.0)) && 
-                    (f.Bold ?? font.IsBold) == (font.Bold ?? font.IsBold) &&
-                    (f.Italic ?? font.IsItalic) == (font.Italic ?? font.IsItalic) &&
-                    (f.Underline ?? font.IsUnderline) == (font.Underline ?? font.IsUnderline) &&
-                    f.Color == font.Color))
-                {
-                    fonts.Add(font);
-                    fontCount++;
-                }
-            }
+                fonts.Add(font);
 
             // 如果没有字体，添加一个默认字体
             if (fonts.Count == 0)
             {
                 fonts.Add(new Font { Name = "Calibri", Size = 11, Bold = false, Italic = false, Underline = false, Color = "00000000" });
-                fontCount++;
             }
-            
-            // 添加工作簿样式中的字体
-            foreach (var style in workbook.Styles ?? Enumerable.Empty<Style>())
-                    {
-                        if (style == null) continue;
-                        if (style.Font != null && !fonts.Any(f => 
-                            f.Name == style.Font.Name && 
-                            f.Size == style.Font.Size && 
-                            f.Bold == style.Font.Bold &&
-                            f.Italic == style.Font.Italic &&
-                            f.Underline == style.Font.Underline &&
-                            f.Color == style.Font.Color))
-                        {
-                            fonts.Add(style.Font);
-                            fontCount++;
-                        }
-                    }
                     
                     writer.WriteAttributeString("count", fonts.Count.ToString());
                     
@@ -1913,13 +1914,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                         
                         // 字体颜色 (color)：OOXML rgb 使用 8 位 ARGB 形式（前两位 alpha）。
                         writer.WriteStartElement("color");
-                        string fontRgb = (font.Color ?? "").Replace("#", "").Trim();
-                        if (fontRgb.Length < 6) fontRgb = "000000";
-                        // ensure we have exactly 8 digits, default alpha FF
-                        if (fontRgb.Length == 6)
-                            fontRgb = "FF" + fontRgb;
-                        else if (fontRgb.Length > 8)
-                            fontRgb = fontRgb.Substring(fontRgb.Length - 8); // keep last 8 if somehow longer
+                        string fontRgb = NormalizeArgb(font.Color) ?? "FF000000";
                         writer.WriteAttributeString("rgb", fontRgb);
                         writer.WriteEndElement();
                         
@@ -1962,13 +1957,13 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                         if (!string.IsNullOrEmpty(fill.ForegroundColor))
                         {
                             writer.WriteStartElement("fgColor");
-                            writer.WriteAttributeString("rgb", fill.ForegroundColor.TrimStart('#'));
+                            writer.WriteAttributeString("rgb", NormalizeArgb(fill.ForegroundColor) ?? "FF000000");
                             writer.WriteEndElement();
                         }
                         if (!string.IsNullOrEmpty(fill.BackgroundColor))
                         {
                             writer.WriteStartElement("bgColor");
-                            writer.WriteAttributeString("rgb", fill.BackgroundColor.TrimStart('#'));
+                            writer.WriteAttributeString("rgb", NormalizeArgb(fill.BackgroundColor) ?? "FF000000");
                             writer.WriteEndElement();
                         }
                         writer.WriteEndElement();
@@ -1998,7 +1993,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                             if (!string.IsNullOrEmpty(border.LeftColor))
                             {
                                 writer.WriteStartElement("color");
-                                writer.WriteAttributeString("rgb", border.LeftColor);
+                                writer.WriteAttributeString("rgb", NormalizeArgb(border.LeftColor) ?? "FF000000");
                                 writer.WriteEndElement();
                             }
                         }
@@ -2012,7 +2007,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                             if (!string.IsNullOrEmpty(border.RightColor))
                             {
                                 writer.WriteStartElement("color");
-                                writer.WriteAttributeString("rgb", border.RightColor);
+                                writer.WriteAttributeString("rgb", NormalizeArgb(border.RightColor) ?? "FF000000");
                                 writer.WriteEndElement();
                             }
                         }
@@ -2026,7 +2021,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                             if (!string.IsNullOrEmpty(border.TopColor))
                             {
                                 writer.WriteStartElement("color");
-                                writer.WriteAttributeString("rgb", border.TopColor);
+                                writer.WriteAttributeString("rgb", NormalizeArgb(border.TopColor) ?? "FF000000");
                                 writer.WriteEndElement();
                             }
                         }
@@ -2040,7 +2035,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                             if (!string.IsNullOrEmpty(border.BottomColor))
                             {
                                 writer.WriteStartElement("color");
-                                writer.WriteAttributeString("rgb", border.BottomColor);
+                                writer.WriteAttributeString("rgb", NormalizeArgb(border.BottomColor) ?? "FF000000");
                                 writer.WriteEndElement();
                             }
                         }
@@ -2054,7 +2049,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                             if (!string.IsNullOrEmpty(border.DiagonalColor))
                             {
                                 writer.WriteStartElement("color");
-                                writer.WriteAttributeString("rgb", border.DiagonalColor);
+                                writer.WriteAttributeString("rgb", NormalizeArgb(border.DiagonalColor) ?? "FF000000");
                                 writer.WriteEndElement();
                             }
                         }
@@ -2101,7 +2096,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                         }
                         else
                             numFmtId = xf.NumberFormatIndex > 0 ? Math.Min((int)xf.NumberFormatIndex, 163) : 0;
-                        int fontId = xf.FontIndex > 0 ? Math.Min((int)xf.FontIndex, maxFontId) : 0;
+                        int fontId = Math.Clamp(NormalizeBiffFontIndex(xf.FontIndex), 0, maxFontId);
                         int fillId = xf.FillIndex > 0 ? Math.Min(xf.FillIndex, maxFillId) : 0;
                         int borderId = xf.BorderIndex > 0 ? Math.Min(xf.BorderIndex, maxBorderId) : 0;
                         writer.WriteAttributeString("numFmtId", numFmtId.ToString());
@@ -2112,7 +2107,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                         
                         if (numFmtId > 0)
                             writer.WriteAttributeString("applyNumberFormat", "1");
-                        if (fontId > 0)
+                        if (fonts.Count > 0)
                             writer.WriteAttributeString("applyFont", "1");
                         if (fillId > 0)
                             writer.WriteAttributeString("applyFill", "1");
