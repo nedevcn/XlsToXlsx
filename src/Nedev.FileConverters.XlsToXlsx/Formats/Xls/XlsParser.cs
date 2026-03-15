@@ -9,30 +9,57 @@ using Nedev.FileConverters.XlsToXlsx.Exceptions;
 
 namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 {
-    public class XlsParser
+    /// <summary>
+    /// XLS文件解析器 - 将BIFF8格式的XLS文件解析为Workbook对象
+    /// </summary>
+    public partial class XlsParser
     {
-        private Stream _rawStream;
+        // 核心依赖
+        private Stream _rawStream = null!;
         private OleCompoundFile _oleFile = null!;
-        private byte[] _workbookData = null!;  // Workbook 流的完整字节数据
-        private Stream _stream = null!;        // 当前正在解析的流 (MemoryStream wrapper)
+        private byte[] _workbookData = null!;
+        private Stream _stream = null!;
         private BinaryReader _reader = null!;
-        private List<string> _sharedStrings;
+        private Workbook _workbook = null!;
+
+        // 数据集合
+        private List<string> _sharedStrings = new List<string>();
         private List<Font> _fonts = new List<Font>();
         private List<Xf> _xfList = new List<Xf>();
         private Dictionary<ushort, string> _formats = new Dictionary<ushort, string>();
         private Dictionary<int, string> _palette = new Dictionary<int, string>();
-        private Workbook _workbook = null!;
+        private List<byte[]> _msoDrawingGroupData = new List<byte[]>();
+        private List<int> _sheetOffsets = new List<int>();
 
-        /// <summary>BIFF8 默认 64 色调色板 (索引 0-63)，无 PALETTE 记录时使用。与 Excel 默认一致。</summary>
+        // 状态跟踪
+        private string _currentCFRange = string.Empty;
+        private List<byte[]> _msoDrawingData = new List<byte[]>();
+        private List<(int Left, int Top, int Width, int Height)> _pendingChartAnchors = new List<(int, int, int, int)>();
+        private PivotTable? _currentPivotTable;
+        private PivotField? _currentPivotField;
+        private int _currentSheetIndex;
+        private string? _sharedFormulaString;
+        private int _sharedFormulaBaseRow;
+        private int _sharedFormulaBaseCol;
+        private int _sharedFormulaLastRow;
+        private int _sharedFormulaLastCol;
+
+        // 安全设置
+        private XlsDecryptor? _decryptor;
+        public long VbaSizeLimit { get; set; } = 50 * 1024 * 1024;
+        public string Password { get; set; } = "VelvetSweatshop";
+        private const long MAX_FILE_SIZE = 100 * 1024 * 1024;
+
+        /// <summary>
+        /// BIFF8默认64色调色板
+        /// </summary>
         private static readonly IReadOnlyDictionary<int, string> Biff8DefaultPalette = CreateBiff8DefaultPalette();
 
         private static IReadOnlyDictionary<int, string> CreateBiff8DefaultPalette()
         {
             var d = new Dictionary<int, string>();
-            // 0-7: 固定色
             string[] first8 = { "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF" };
             for (int i = 0; i < first8.Length; i++) d[i] = first8[i];
-            // 8-63: Excel 默认 56 色 (标准 BIFF8 调色板)
             string[] rest = {
                 "800000", "000080", "008000", "008080", "800080", "808000", "C0C0C0", "808080",
                 "9999FF", "993366", "FFFFCC", "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF",
@@ -46,52 +73,19 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             return d;
         }
 
-        private const long MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB文件大小限制
-
-        // 工作簿级别的OfficeArt (DggContainer bytes)
-        private List<byte[]> _msoDrawingGroupData = new List<byte[]>();
-
-        // BOUNDSHEET 记录中的工作表子流偏移量 (lbPlyPos)
-        private List<int> _sheetOffsets = new List<int>();
-
-        /// <summary>
-        /// VBA项目大小限制（字节）
-        /// </summary>
-        public long VbaSizeLimit { get; set; } = 50 * 1024 * 1024;
-        private string _currentCFRange = string.Empty; // 当前条件格式的范围
-
-        // 画图对象状态
-        private List<byte[]> _msoDrawingData = new List<byte[]>();
-        private List<(int Left, int Top, int Width, int Height)> _pendingChartAnchors = new List<(int, int, int, int)>();
-
-        /// <summary>
-        /// XLS 文件打开密码
-        /// </summary>
-        public string Password { get; set; } = "VelvetSweatshop";
-        private XlsDecryptor? _decryptor;
-
-        // 数据透视表解析状态
-        private PivotTable? _currentPivotTable;
-        private PivotField? _currentPivotField;
-        /// <summary>当前解析的工作表索引（0-based），用于解析 AutoFilter 时查找 _FilterDatabase 名称。</summary>
-        private int _currentSheetIndex;
-
-        // 共享公式：SHAREDFMLA 后的主公式及范围，用于后续 FORMULA 单元格按行列差调整引用
-        private string? _sharedFormulaString;
-        private int _sharedFormulaBaseRow;
-        private int _sharedFormulaBaseCol;
-        private int _sharedFormulaLastRow;
-        private int _sharedFormulaLastCol;
-
         public XlsParser(Stream stream)
         {
-            // 验证流是否可读
+            Initialize(stream);
+        }
+
+        private void Initialize(Stream stream)
+        {
+            if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (!stream.CanRead)
             {
                 throw new XlsToXlsxException("Stream must be readable", 1000, "StreamError");
             }
 
-            // 检查文件大小限制
             if (stream.CanSeek)
             {
                 long fileSize = stream.Length;
@@ -103,6 +97,12 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
 
             _rawStream = stream;
             _sharedStrings = new List<string>();
+            _fonts = new List<Font>();
+            _xfList = new List<Xf>();
+            _formats = new Dictionary<ushort, string>();
+            _palette = new Dictionary<int, string>();
+            _msoDrawingGroupData = new List<byte[]>();
+            _sheetOffsets = new List<int>();
         }
 
         public Workbook Parse()
@@ -119,7 +119,8 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                 Logger.Info("OLE复合文件解析完成");
 
                 // 2. 解析 SummaryInformation / DocumentSummaryInformation 文档属性
-                ParseDocumentProperties(workbook);
+                var docPropsParser = new DocumentPropertiesParser(_oleFile);
+                docPropsParser.Parse(workbook);
 
                 // 3. 读取 Workbook 流
                 _workbookData = _oleFile.ReadStreamByName("Workbook")
@@ -242,223 +243,8 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             }
         }
 
-        private static int NormalizeBiffFontIndex(int fontIndex)
-        {
-            if (fontIndex < 0)
-                return 0;
-
-            // BIFF reserves font slot 4, so all font indices after 4 are shifted by one
-            // relative to the FONT record sequence we store in workbook.Fonts.
-            return fontIndex > 4 ? fontIndex - 1 : fontIndex;
-        }
+        private static int NormalizeBiffFontIndex(int fontIndex) => ParsingHelpers.NormalizeBiffFontIndex(fontIndex);
         
-        // ===== 全局流解析 =====
-        /// <summary>
-        /// 解析 SummaryInformation / DocumentSummaryInformation 属性集，填充 Workbook 元数据。
-        /// </summary>
-        private void ParseDocumentProperties(Workbook workbook)
-        {
-            if (_oleFile == null) return;
-            try
-            {
-                var summary = _oleFile.ReadStreamByName("\u0005SummaryInformation");
-                if (summary != null && summary.Length >= 48)
-                {
-                    ParseSummaryInformation(summary, workbook);
-                }
-
-                var docSummary = _oleFile.ReadStreamByName("\u0005DocumentSummaryInformation");
-                if (docSummary != null && docSummary.Length >= 48)
-                {
-                    ParseDocumentSummaryInformation(docSummary, workbook);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"解析文档属性时发生错误: {ex.Message}");
-            }
-        }
-
-        private static void ParseSummaryInformation(byte[] data, Workbook workbook)
-        {
-            if (!TryReadPropertySection(data, out var props, out int codePage))
-                return;
-
-            foreach (var p in props)
-            {
-                uint vt = BitConverter.ToUInt32(data, p.ValueOffset);
-                switch (p.Id)
-                {
-                    case 2: // Title
-                        workbook.Title ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 3: // Subject
-                        workbook.Subject ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 4: // Author
-                        workbook.Author ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 5: // Keywords
-                        workbook.Keywords ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 6: // Comments
-                        workbook.Comments ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 8: // LastAuthor
-                        workbook.LastAuthor ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 12: // Create time
-                        workbook.CreatedUtc ??= ReadFileTimeUtc(data, p.ValueOffset, vt);
-                        break;
-                    case 13: // Last save time
-                        workbook.ModifiedUtc ??= ReadFileTimeUtc(data, p.ValueOffset, vt);
-                        break;
-                }
-            }
-        }
-
-        private static void ParseDocumentSummaryInformation(byte[] data, Workbook workbook)
-        {
-            if (!TryReadPropertySection(data, out var props, out int codePage))
-                return;
-
-            foreach (var p in props)
-            {
-                uint vt = BitConverter.ToUInt32(data, p.ValueOffset);
-                switch (p.Id)
-                {
-                    case 2: // Category
-                        workbook.Category ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 14: // Manager
-                        workbook.Manager ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                    case 15: // Company
-                        workbook.Company ??= ReadPropertyString(data, p.ValueOffset, codePage, vt);
-                        break;
-                }
-            }
-        }
-
-        private readonly struct PropertyRef
-        {
-            public readonly uint Id;
-            public readonly int ValueOffset;
-            public PropertyRef(uint id, int valueOffset)
-            {
-                Id = id;
-                ValueOffset = valueOffset;
-            }
-        }
-
-        /// <summary>
-        /// 解析 OLE PropertySetStream 的首个 section，返回属性列表与代码页。
-        /// </summary>
-        private static bool TryReadPropertySection(byte[] data, out List<PropertyRef> props, out int codePage)
-        {
-            props = new List<PropertyRef>();
-            codePage = 1252;
-            if (data == null || data.Length < 48) return false;
-
-            ushort byteOrder = BitConverter.ToUInt16(data, 0);
-            if (byteOrder != 0xFFFE) return false;
-
-            int cSections = BitConverter.ToInt32(data, 24);
-            if (cSections <= 0) return false;
-
-            int sectionListOffset = 28;
-            if (data.Length < sectionListOffset + 20) return false;
-
-            // 只读第一个 section
-            int sectionOffset = BitConverter.ToInt32(data, sectionListOffset + 16);
-            if (sectionOffset <= 0 || sectionOffset + 8 > data.Length) return false;
-
-            int cbSection = BitConverter.ToInt32(data, sectionOffset);
-            int cProps = BitConverter.ToInt32(data, sectionOffset + 4);
-            if (cProps <= 0) return false;
-
-            int propListOffset = sectionOffset + 8;
-            for (int i = 0; i < cProps; i++)
-            {
-                if (propListOffset + 8 > data.Length) break;
-                uint propId = BitConverter.ToUInt32(data, propListOffset);
-                int offset = BitConverter.ToInt32(data, propListOffset + 4);
-                int valueOffset = sectionOffset + offset;
-                if (valueOffset >= 0 && valueOffset + 8 <= data.Length)
-                    props.Add(new PropertyRef(propId, valueOffset));
-                propListOffset += 8;
-            }
-
-            // 先找 CodePage (propId=1, VT_I2)
-            foreach (var p in props)
-            {
-                if (p.Id != 1) continue;
-                if (p.ValueOffset + 8 > data.Length) continue;
-                uint vt = BitConverter.ToUInt32(data, p.ValueOffset);
-                if (vt == 0x0002 && p.ValueOffset + 6 <= data.Length)
-                {
-                    codePage = BitConverter.ToUInt16(data, p.ValueOffset + 4);
-                }
-                break;
-            }
-
-            return props.Count > 0;
-        }
-
-        private static string? ReadPropertyString(byte[] data, int valueOffset, int codePage, uint vt)
-        {
-            try
-            {
-                if (valueOffset + 8 > data.Length) return null;
-                if (vt == 0x1E) // VT_LPSTR
-                {
-                    int len = BitConverter.ToInt32(data, valueOffset + 4);
-                    if (len <= 0) return null;
-                    int bytesLen = len;
-                    int start = valueOffset + 8;
-                    if (start + bytesLen > data.Length)
-                        bytesLen = Math.Max(0, data.Length - start);
-                    if (bytesLen <= 0) return null;
-                    var enc = Encoding.GetEncoding(codePage <= 0 ? 1252 : codePage);
-                    string s = enc.GetString(data, start, bytesLen);
-                    return s.TrimEnd('\0');
-                }
-                else if (vt == 0x1F) // VT_LPWSTR
-                {
-                    int cch = BitConverter.ToInt32(data, valueOffset + 4);
-                    if (cch <= 0) return null;
-                    int bytesLen = cch * 2;
-                    int start = valueOffset + 8;
-                    if (start + bytesLen > data.Length)
-                        bytesLen = Math.Max(0, data.Length - start);
-                    if (bytesLen <= 0) return null;
-                    string s = Encoding.Unicode.GetString(data, start, bytesLen);
-                    return s.TrimEnd('\0');
-                }
-            }
-            catch
-            {
-                // ignore malformed
-            }
-            return null;
-        }
-
-        private static DateTime? ReadFileTimeUtc(byte[] data, int valueOffset, uint vt)
-        {
-            try
-            {
-                if (vt != 0x40) return null; // VT_FILETIME
-                if (valueOffset + 12 > data.Length) return null;
-                long fileTime = BitConverter.ToInt64(data, valueOffset + 4);
-                if (fileTime <= 0) return null;
-                return DateTime.FromFileTimeUtc(fileTime);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
         /// <summary>
         /// 解析 Workbook 全局子流（从 BOF 到 EOF），收集 BOUNDSHEET/SST/FONT/XF/FORMAT 等全局记录。
         /// </summary>
@@ -2434,47 +2220,9 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             return cell;
         }
         
-        private string GetErrorString(byte errorCode)
-        {
-            // 映射错误代码到错误字符串
-            switch (errorCode)
-            {
-                case 0x00: return "#NULL!";
-                case 0x07: return "#DIV/0!";
-                case 0x0F: return "#VALUE!";
-                case 0x17: return "#REF!";
-                case 0x1D: return "#NAME?";
-                case 0x24: return "#NUM!";
-                case 0x2A: return "#N/A";
-                default: return "#ERROR!";
-            }
-        }
+        private string GetErrorString(byte errorCode) => ParsingHelpers.GetErrorString(errorCode);
         
-        private double DecodeRKValue(int rkValue)
-        {
-            // 解码RK值（压缩数值）
-            // bit 0: 1 = 除以100, 0 = 不变
-            // bit 1: 1 = 30位有符号整数, 0 = IEEE 754 double的前30位
-            double value;
-            if ((rkValue & 0x02) != 0)
-            {
-                // 30位整数
-                value = (double)(rkValue >> 2);
-            }
-            else
-            {
-                // IEEE double 的前30位
-                long bits = (long)(rkValue & 0xFFFFFFFC) << 32;
-                value = BitConverter.Int64BitsToDouble(bits);
-            }
-
-            if ((rkValue & 0x01) != 0)
-            {
-                value /= 100.0;
-            }
-
-            return value;
-        }
+        private double DecodeRKValue(int rkValue) => ParsingHelpers.DecodeRKValue(rkValue);
         
         private bool IsDateTimeValue(double value)
         {
@@ -2582,10 +2330,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             return ExcelAddressHelper.LettersToColumnIndex0Based(letters);
         }
 
-        private static string GetColumnLetterStatic(int columnIndex)
-        {
-            return ExcelAddressHelper.ColumnIndexToLetters0Based(columnIndex);
-        }
+        private static string GetColumnLetterStatic(int columnIndex) => ParsingHelpers.ColumnIndexToLetters0Based(columnIndex);
 
         /// <summary>解析 BIFF8 DIMENSION (0x0200)：firstRow(4), lastRow(4), firstCol(2), lastCol(2), reserved(2)。行列均为 0-based，用于初始化或扩展 MaxRow/MaxColumn。</summary>
         private void ParseDimensionRecord(BiffRecord record, Worksheet worksheet)
@@ -2848,27 +2593,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             }
         }
 
-        private string GetBorderLineStyle(byte styleId)
-        {
-            switch (styleId)
-            {
-                case 0: return "none";
-                case 1: return "thin";
-                case 2: return "medium";
-                case 3: return "dashed";
-                case 4: return "dotted";
-                case 5: return "thick";
-                case 6: return "double";
-                case 7: return "hair";
-                case 8: return "mediumDashed";
-                case 9: return "dashDot";
-                case 10: return "mediumDashDot";
-                case 11: return "dashDotDot";
-                case 12: return "mediumDashDotDot";
-                case 13: return "slantDashDot";
-                default: return "none";
-            }
-        }
+        private string GetBorderLineStyle(byte styleId) => ParsingHelpers.GetBorderLineStyle(styleId);
 
         private string? GetColorFromPalette(int colorIndex, Worksheet? sheet = null)
         {
@@ -3161,31 +2886,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             }
         }
 
-        private string GetPatternType(byte patternId)
-        {
-            switch (patternId)
-            {
-                case 0: return "none";
-                case 1: return "solid";
-                case 2: return "mediumGray";
-                case 3: return "darkGray";
-                case 4: return "lightGray";
-                case 5: return "darkHorizontal";
-                case 6: return "darkVertical";
-                case 7: return "darkDown";
-                case 8: return "darkUp";
-                case 9: return "darkGrid";
-                case 10: return "darkTrellis";
-                case 11: return "lightHorizontal";
-                case 12: return "lightVertical";
-                case 13: return "lightDown";
-                case 14: return "lightUp";
-                case 15: return "lightGrid";
-                case 16: return "lightTrellis";
-                case 17: return "gray125";
-                case 18: return "gray0625";
-                default: return "none";
-            }
-        }
+        private string GetPatternType(byte patternId) => ParsingHelpers.GetPatternType(patternId);
     }
 }
