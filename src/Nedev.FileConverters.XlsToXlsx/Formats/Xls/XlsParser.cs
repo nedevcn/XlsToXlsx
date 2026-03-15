@@ -45,6 +45,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
         private WorksheetConfigParser? _worksheetConfigParser;
         private ConditionalFormatParser? _conditionalFormatParser;
         private AutoFilterParser? _autoFilterParser;
+        private DataValidationParser? _dataValidationParser;
+        private HyperlinkParser? _hyperlinkParser;
+        private CommentParser? _commentParser;
+        private MultiCellParser? _multiCellParser;
 
         // 安全设置
         private XlsDecryptor? _decryptor;
@@ -453,6 +457,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             _worksheetConfigParser = new WorksheetConfigParser();
             _conditionalFormatParser = new ConditionalFormatParser(workbook);
             _autoFilterParser = new AutoFilterParser(_currentSheetIndex);
+            _dataValidationParser = new DataValidationParser(workbook);
+            _hyperlinkParser = new HyperlinkParser();
+            _commentParser = new CommentParser();
+            _multiCellParser = new MultiCellParser();
 
             _msoDrawingData.Clear();
             _pendingChartAnchors.Clear();
@@ -622,10 +630,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             }
                             break;
                         case (ushort)BiffRecordType.MULRK:
-                            ParseMulRkRecord(record, ref currentRow, worksheet);
+                            _multiCellParser?.ParseMulRkRecord(record, ref currentRow, worksheet);
                             break;
                         case (ushort)BiffRecordType.MULBLANK:
-                            ParseMulBlankRecord(record, ref currentRow, worksheet);
+                            _multiCellParser?.ParseMulBlankRecord(record, ref currentRow, worksheet);
                             break;
                         case (ushort)BiffRecordType.MERGECELLS:
                             _cellParser?.ParseMergeCellsRecord(record, worksheet);
@@ -652,7 +660,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             _worksheetConfigParser?.ParsePasswordRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.DV:
-                            ParseDVRecord(record, worksheet);
+                            _dataValidationParser?.ParseDVRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.CFHEADER:
                             _conditionalFormatParser?.ParseCFHeaderRecord(record);
@@ -661,10 +669,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             _conditionalFormatParser?.ParseCFRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.HYPERLINK:
-                            ParseHyperlinkRecord(record, worksheet);
+                            _hyperlinkParser?.ParseHyperlinkRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.NOTE:
-                            ParseCommentRecord(record, worksheet);
+                            _commentParser?.ParseCommentRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.MSODRAWING:
                             ParseMSODrawingRecord(record, worksheet);
@@ -771,73 +779,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                     string formatString = System.Text.Encoding.ASCII.GetString(data, 3, formatLength);
                     _formats[formatIndex] = formatString;
                 }
-            }
-        }
-        
-        private void ParseMulRkRecord(BiffRecord record, ref Row currentRow, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 12)
-                return;
-            ushort row = BitConverter.ToUInt16(data, 0);
-            ushort firstCol = BitConverter.ToUInt16(data, 2);
-            ushort lastCol = BitConverter.ToUInt16(data, 4);
-            // 数组从偏移 6 开始： [XF(2), RK(4)] * numCells；与 lastCol 一致时 numCells = lastCol - firstCol + 1
-            int numCells = (data.Length - 6) / 6;
-            if (lastCol >= firstCol)
-                numCells = Math.Min(numCells, lastCol - firstCol + 1);
-            if (numCells <= 0) return;
-            var targetRow = GetOrCreateRow(worksheet, ref currentRow, row + 1);
-            for (int j = 0; j < numCells; j++)
-            {
-                int offset = 6 + j * 6;
-                if (offset + 6 > data.Length) break;
-                ushort xfIndex = BitConverter.ToUInt16(data, offset);
-                int rkValue = BitConverter.ToInt32(data, offset + 2);
-                double value = DecodeRKValue(rkValue);
-                var cell = new Cell
-                {
-                    RowIndex = row + 1,
-                    ColumnIndex = firstCol + j + 1,
-                    Value = value,
-                    DataType = "n",
-                    StyleId = xfIndex.ToString()
-                };
-                targetRow.Cells.Add(cell);
-                if (cell.ColumnIndex > worksheet.MaxColumn)
-                    worksheet.MaxColumn = cell.ColumnIndex;
-            }
-        }
-        
-        private void ParseMulBlankRecord(BiffRecord record, ref Row currentRow, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 8)
-                return;
-            ushort row = BitConverter.ToUInt16(data, 0);
-            ushort firstCol = BitConverter.ToUInt16(data, 2);
-            ushort lastCol = BitConverter.ToUInt16(data, 4);
-            // 数组从偏移 6 开始： [XF(2)] * numCells
-            int numCells = (data.Length - 6) / 2;
-            if (lastCol >= firstCol)
-                numCells = Math.Min(numCells, lastCol - firstCol + 1);
-            if (numCells <= 0) return;
-            var targetRow = GetOrCreateRow(worksheet, ref currentRow, row + 1);
-            for (int j = 0; j < numCells; j++)
-            {
-                int offset = 6 + j * 2;
-                if (offset + 2 > data.Length) break;
-                ushort xfIndex = BitConverter.ToUInt16(data, offset);
-                var cell = new Cell
-                {
-                    RowIndex = row + 1,
-                    ColumnIndex = firstCol + j + 1,
-                    Value = null,
-                    StyleId = xfIndex.ToString()
-                };
-                targetRow.Cells.Add(cell);
-                if (cell.ColumnIndex > worksheet.MaxColumn)
-                    worksheet.MaxColumn = cell.ColumnIndex;
             }
         }
         
@@ -1192,122 +1133,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             {
                 throw new ImageProcessingException($"处理图片时发生错误: {ex.Message}", ex);
             }
-        }
-
-        
-        private void ParseDVRecord(BiffRecord record, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 16)
-                return;
-            var dataValidation = new DataValidation();
-
-            ushort options = BitConverter.ToUInt16(data, 0);
-            dataValidation.AllowBlank = (options & 0x01) != 0;
-
-            ushort validationType = BitConverter.ToUInt16(data, 2);
-                switch (validationType)
-                {
-                    case 0: dataValidation.Type = "none"; break;
-                    case 1: dataValidation.Type = "whole"; break;
-                    case 2: dataValidation.Type = "decimal"; break;
-                    case 3: dataValidation.Type = "list"; break;
-                    case 4: dataValidation.Type = "date"; break;
-                    case 5: dataValidation.Type = "time"; break;
-                    case 6: dataValidation.Type = "textLength"; break;
-                    case 7: dataValidation.Type = "custom"; break;
-                }
-                
-            ushort operatorType = BitConverter.ToUInt16(data, 4);
-            switch (operatorType)
-            {
-                case 0: dataValidation.Operator = "between"; break;
-                case 1: dataValidation.Operator = "notBetween"; break;
-                case 2: dataValidation.Operator = "equal"; break;
-                case 3: dataValidation.Operator = "notEqual"; break;
-                case 4: dataValidation.Operator = "greaterThan"; break;
-                case 5: dataValidation.Operator = "lessThan"; break;
-                case 6: dataValidation.Operator = "greaterThanOrEqual"; break;
-                case 7: dataValidation.Operator = "lessThanOrEqual"; break;
-            }
-
-            int currentOffset = 6;
-            ushort formula1Size = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
-            ushort formula2Size = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
-
-            if (formula1Size > 0 && currentOffset + formula1Size <= data.Length)
-            {
-                byte[] formula1Bytes = new byte[formula1Size];
-                Array.Copy(data, currentOffset, formula1Bytes, 0, formula1Size);
-                dataValidation.Formula1 = FormulaDecompiler.Decompile(formula1Bytes, _workbook);
-                currentOffset += formula1Size;
-            }
-            if (formula2Size > 0 && currentOffset + formula2Size <= data.Length)
-            {
-                byte[] formula2Bytes = new byte[formula2Size];
-                Array.Copy(data, currentOffset, formula2Bytes, 0, formula2Size);
-                dataValidation.Formula2 = FormulaDecompiler.Decompile(formula2Bytes, _workbook);
-                currentOffset += formula2Size;
-            }
-            if (currentOffset + 8 <= data.Length)
-            {
-                ushort firstRow = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
-                ushort lastRow = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
-                ushort firstCol = BitConverter.ToUInt16(data, currentOffset); currentOffset += 2;
-                ushort lastCol = BitConverter.ToUInt16(data, currentOffset);
-                dataValidation.Range = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
-            }
-            else
-            {
-                dataValidation.Range = "A1:A10";
-            }
-            worksheet.DataValidations.Add(dataValidation);
-        }
-        
-        private void ParseHyperlinkRecord(BiffRecord record, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 20)
-                return;
-            var hyperlink = new Hyperlink();
-            ushort firstRow = BitConverter.ToUInt16(data, 0);
-            ushort lastRow = BitConverter.ToUInt16(data, 2);
-            ushort firstCol = BitConverter.ToUInt16(data, 4);
-            ushort lastCol = BitConverter.ToUInt16(data, 6);
-            hyperlink.Range = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
-            int urlLength = BitConverter.ToInt16(data, 18);
-            if (urlLength > 0 && data.Length >= 20 + urlLength)
-                hyperlink.Target = System.Text.Encoding.ASCII.GetString(data, 20, urlLength);
-            else if (urlLength > 0 && data.Length > 20)
-            {
-                int safeLen = Math.Min(urlLength, data.Length - 20);
-                hyperlink.Target = System.Text.Encoding.ASCII.GetString(data, 20, safeLen);
-            }
-            worksheet.Hyperlinks.Add(hyperlink);
-        }
-
-        private void ParseCommentRecord(BiffRecord record, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 12)
-                return;
-            var comment = new Comment();
-            ushort row = BitConverter.ToUInt16(data, 0);
-            ushort col = BitConverter.ToUInt16(data, 2);
-            comment.RowIndex = row + 1;
-            comment.ColumnIndex = col + 1;
-            if (data.Length >= 14)
-            {
-                byte authorLength = data[12];
-                if (authorLength > 0 && data.Length >= 13 + authorLength)
-                {
-                    comment.Author = System.Text.Encoding.ASCII.GetString(data, 13, authorLength);
-                    int textOffset = 13 + authorLength;
-                    if (data.Length > textOffset)
-                        comment.Text = System.Text.Encoding.ASCII.GetString(data, textOffset, data.Length - textOffset);
-                }
-            }
-            worksheet.Comments.Add(comment);
         }
 
         private string GetColumnLetter(int columnIndex)
