@@ -32,17 +32,19 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
         private List<int> _sheetOffsets = new List<int>();
 
         // 状态跟踪
-        private string _currentCFRange = string.Empty;
         private List<byte[]> _msoDrawingData = new List<byte[]>();
         private List<(int Left, int Top, int Width, int Height)> _pendingChartAnchors = new List<(int, int, int, int)>();
-        private PivotTable? _currentPivotTable;
-        private PivotField? _currentPivotField;
         private int _currentSheetIndex;
-        private string? _sharedFormulaString;
-        private int _sharedFormulaBaseRow;
-        private int _sharedFormulaBaseCol;
-        private int _sharedFormulaLastRow;
-        private int _sharedFormulaLastCol;
+
+        // 专用解析器
+        private StyleParser? _styleParser;
+        private CellParser? _cellParser;
+        private ChartParser? _chartParser;
+        private PivotTableParser? _pivotTableParser;
+        private ExternalLinkParser? _externalLinkParser;
+        private WorksheetConfigParser? _worksheetConfigParser;
+        private ConditionalFormatParser? _conditionalFormatParser;
+        private AutoFilterParser? _autoFilterParser;
 
         // 安全设置
         private XlsDecryptor? _decryptor;
@@ -250,6 +252,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
         /// </summary>
         private void ParseWorkbookGlobals(Workbook workbook)
         {
+            // 初始化解析器
+            _styleParser = new StyleParser(workbook, _palette, _formats, _fonts, _xfList);
+            _externalLinkParser = new ExternalLinkParser();
+            
             _stream.Seek(0, SeekOrigin.Begin);
             long streamEnd = _workbookData.Length;
 
@@ -333,22 +339,22 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                     ParseSstInfo(record, streamEnd);
                     break;
                 case (ushort)BiffRecordType.FONT:
-                    ParseFontRecordToGlobal(record);
+                    _styleParser?.ParseFontRecord(record);
                     break;
                 case (ushort)BiffRecordType.XF:
-                    ParseXfRecordToGlobal(record);
+                    _styleParser?.ParseXfRecord(record);
                     break;
                 case (ushort)BiffRecordType.FORMAT:
-                    ParseFormatRecordGlobal(record);
+                    _styleParser?.ParseFormatRecord(record);
                     break;
                 case (ushort)BiffRecordType.PALETTE:
-                    ParsePaletteRecordGlobal(record);
+                    _styleParser?.ParsePaletteRecord(record);
                     break;
                 case (ushort)BiffRecordType.BORDER:
-                    ParseBorderRecord(record, workbook);
+                    _styleParser?.ParseBorderRecord(record);
                     break;
                 case (ushort)BiffRecordType.FILL:
-                    ParseFillRecord(record, workbook);
+                    _styleParser?.ParseFillRecord(record);
                     break;
                 case (ushort)BiffRecordType.NAME:
                     ParseNameRecord(record, workbook);
@@ -364,13 +370,13 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                     }
                     break;
                 case (ushort)BiffRecordType.EXTERNBOOK:
-                    ParseExternBookRecord(record, workbook);
+                    _externalLinkParser?.ParseExternBookRecord(record, workbook);
                     break;
                 case (ushort)BiffRecordType.EXTERNSHEET:
-                    ParseExternSheetRecord(record, workbook);
+                    _externalLinkParser?.ParseExternSheetRecord(record, workbook);
                     break;
                 case (ushort)BiffRecordType.EXTERNALNAME:
-                    ParseExternalNameRecord(record, workbook);
+                    _externalLinkParser?.ParseExternalNameRecord(record, workbook);
                     break;
                 case (ushort)BiffRecordType.PROTECT:
                     // 全局 PROTECT: 锁定工作簿结构
@@ -440,6 +446,14 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
         /// </summary>
         private void ParseWorksheetSubstream(Worksheet worksheet, Workbook workbook)
         {
+            // 初始化解析器
+            _cellParser = new CellParser(_sharedStrings, _fonts, workbook);
+            _chartParser = new ChartParser(workbook, _decryptor, _workbookData, _stream, _reader, _pendingChartAnchors);
+            _pivotTableParser = new PivotTableParser();
+            _worksheetConfigParser = new WorksheetConfigParser();
+            _conditionalFormatParser = new ConditionalFormatParser(workbook);
+            _autoFilterParser = new AutoFilterParser(_currentSheetIndex);
+
             _msoDrawingData.Clear();
             _pendingChartAnchors.Clear();
             
@@ -521,7 +535,7 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                         if (bofType == 0x0020) // 图表子流
                         {
                             Logger.Info($"在工作表 {worksheet.Name} 后发现图表子流，开始解析");
-                            ParseChartSubstream(worksheet, workbook);
+                            _chartParser?.ParseChartSubstream(worksheet);
                             continue; // 图表子流解析完毕后，继续检查是否还有其他图表子流附在该工作表后面
                         }
                     }
@@ -546,15 +560,18 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                 case (ushort)BiffRecordType.EOF:
                     return;
                         case (ushort)BiffRecordType.DIMENSION:
-                            ParseDimensionRecord(record, worksheet);
+                            _cellParser?.ParseDimensionRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.ROW:
-                            var parsedRow = ParseRowRecord(record);
-                            var existingRow = GetOrCreateRow(worksheet, ref currentRow, parsedRow.RowIndex);
-                            existingRow.Height = parsedRow.Height;
-                            existingRow.CustomHeight = parsedRow.CustomHeight;
-                            existingRow.DefaultXfIndex = parsedRow.DefaultXfIndex;
-                            if (existingRow.RowIndex > worksheet.MaxRow) worksheet.MaxRow = (int)existingRow.RowIndex;
+                            var parsedRow = _cellParser?.ParseRowRecord(record);
+                            if (parsedRow != null)
+                            {
+                                var existingRow = GetOrCreateRow(worksheet, ref currentRow, parsedRow.RowIndex);
+                                existingRow.Height = parsedRow.Height;
+                                existingRow.CustomHeight = parsedRow.CustomHeight;
+                                existingRow.DefaultXfIndex = parsedRow.DefaultXfIndex;
+                                if (existingRow.RowIndex > worksheet.MaxRow) worksheet.MaxRow = (int)existingRow.RowIndex;
+                            }
                             break;
                         case (ushort)BiffRecordType.CELL_BLANK:
                         case (ushort)BiffRecordType.CELL_BOOLERR:
@@ -563,9 +580,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                         case (ushort)BiffRecordType.CELL_NUMBER:
                         case (ushort)BiffRecordType.CELL_RK:
                         case (ushort)BiffRecordType.CELL_RSTRING: // 旧版富文本
-                            var cell = ParseCellRecord(record);
-                            if (cell.ColumnIndex >= 1 && cell.ColumnIndex <= 16384)
+                            var cell = _cellParser?.ParseCellRecord(record);
+                            if (cell != null && cell.ColumnIndex >= 1 && cell.ColumnIndex <= 16384)
                             {
+                                _cellParser?.TryApplyPendingArrayFormula(cell);
                                 var targetRow = GetOrCreateRow(worksheet, ref currentRow, cell.RowIndex);
                                 targetRow.Cells.Add(cell);
                                 if (cell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = cell.ColumnIndex;
@@ -573,10 +591,11 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             }
                             break;
                         case (ushort)BiffRecordType.CELL_FORMULA:
-                            var formulaCell = ParseCellRecord(record);
-                            if (formulaCell.ColumnIndex >= 1 && formulaCell.ColumnIndex <= 16384)
+                            var formulaCell = _cellParser?.ParseCellRecord(record);
+                            if (formulaCell != null && formulaCell.ColumnIndex >= 1 && formulaCell.ColumnIndex <= 16384)
                             {
-                                ApplySharedFormulaToCell(formulaCell);
+                                _cellParser?.ApplySharedFormula(formulaCell);
+                                _cellParser?.TryApplyPendingArrayFormula(formulaCell);
                                 var targetRow2 = GetOrCreateRow(worksheet, ref currentRow, formulaCell.RowIndex);
                                 targetRow2.Cells.Add(formulaCell);
                                 if (formulaCell.ColumnIndex > worksheet.MaxColumn) worksheet.MaxColumn = formulaCell.ColumnIndex;
@@ -584,10 +603,10 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             }
                             break;
                         case (ushort)BiffRecordType.ARRAY:
-                            ParseArrayRecord(record, ref currentRow);
+                            _cellParser?.ParseArrayRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.SHAREDFMLA:
-                            ParseSharedFmlaRecord(record);
+                            _cellParser?.ParseSharedFormulaRecord(record);
                             break;
                         case (ushort)BiffRecordType.STRING:
                             if (currentRow != null && currentRow.Cells.Count > 0)
@@ -609,49 +628,37 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             ParseMulBlankRecord(record, ref currentRow, worksheet);
                             break;
                         case (ushort)BiffRecordType.MERGECELLS:
-                            ParseMergeCellsRecord(record, worksheet);
+                            _cellParser?.ParseMergeCellsRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.COLINFO:
-                            ParseColInfoRecord(record, worksheet);
+                            _worksheetConfigParser?.ParseColInfoRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.DEFCOLWIDTH:
-                            if (record.Data != null && record.Data.Length >= 2)
-                                worksheet.DefaultColumnWidth = BitConverter.ToUInt16(record.Data, 0);
+                            _worksheetConfigParser?.ParseDefColWidthRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.DEFAULTROWHEIGHT:
-                            if (record.Data != null && record.Data.Length >= 4)
-                                worksheet.DefaultRowHeight = BitConverter.ToUInt16(record.Data, 2) / 20.0;
+                            _worksheetConfigParser?.ParseDefaultRowHeightRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.WINDOW2:
-                            ParseWindow2Record(record, worksheet);
+                            _worksheetConfigParser?.ParseWindow2Record(record, worksheet);
                             break;
                         case 0x0041: // PANE
-                            ParsePaneRecord(record, worksheet);
+                            _worksheetConfigParser?.ParsePaneRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.PROTECT:
-                            // 工作表保护标志
-                            if (record.Data != null && record.Data.Length >= 2)
-                            {
-                                ushort flags = BitConverter.ToUInt16(record.Data, 0);
-                                worksheet.IsProtected = (flags & 0x0001) != 0;
-                            }
+                            _worksheetConfigParser?.ParseProtectRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.PASSWORD:
-                            // 工作表保护密码
-                            if (record.Data != null && record.Data.Length >= 2)
-                            {
-                                ushort hash = BitConverter.ToUInt16(record.Data, 0);
-                                worksheet.SheetPasswordHash = hash.ToString("X4", System.Globalization.CultureInfo.InvariantCulture);
-                            }
+                            _worksheetConfigParser?.ParsePasswordRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.DV:
                             ParseDVRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.CFHEADER:
-                            ParseCFHeaderRecord(record, worksheet);
+                            _conditionalFormatParser?.ParseCFHeaderRecord(record);
                             break;
                         case (ushort)BiffRecordType.CF:
-                            ParseCFRecord(record, worksheet);
+                            _conditionalFormatParser?.ParseCFRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.HYPERLINK:
                             ParseHyperlinkRecord(record, worksheet);
@@ -669,59 +676,43 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                             ParseObjRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.HEADER:
-                            byte[] headerData = record.GetAllData();
-                            if (headerData.Length > 0)
-                            {
-                                int hPos = 0;
-                                worksheet.PageSettings.Header = ReadBiffString(headerData, ref hPos);
-                            }
+                            _worksheetConfigParser?.ParseHeaderRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.FOOTER:
-                            byte[] footerData = record.GetAllData();
-                            if (footerData.Length > 0)
-                            {
-                                int fPos = 0;
-                                worksheet.PageSettings.Footer = ReadBiffString(footerData, ref fPos);
-                            }
+                            _worksheetConfigParser?.ParseFooterRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.LEFTMARGIN:
-                            if (record.Data != null && record.Data.Length >= 8)
-                                worksheet.PageSettings.LeftMargin = BitConverter.ToDouble(record.Data, 0);
+                            _worksheetConfigParser?.ParseMarginRecord(record, worksheet, BiffRecordType.LEFTMARGIN);
                             break;
                         case (ushort)BiffRecordType.RIGHTMARGIN:
-                            if (record.Data != null && record.Data.Length >= 8)
-                                worksheet.PageSettings.RightMargin = BitConverter.ToDouble(record.Data, 0);
+                            _worksheetConfigParser?.ParseMarginRecord(record, worksheet, BiffRecordType.RIGHTMARGIN);
                             break;
                         case (ushort)BiffRecordType.TOPMARGIN:
-                            if (record.Data != null && record.Data.Length >= 8)
-                                worksheet.PageSettings.TopMargin = BitConverter.ToDouble(record.Data, 0);
+                            _worksheetConfigParser?.ParseMarginRecord(record, worksheet, BiffRecordType.TOPMARGIN);
                             break;
                         case (ushort)BiffRecordType.BOTTOMMARGIN:
-                            if (record.Data != null && record.Data.Length >= 8)
-                                worksheet.PageSettings.BottomMargin = BitConverter.ToDouble(record.Data, 0);
+                            _worksheetConfigParser?.ParseMarginRecord(record, worksheet, BiffRecordType.BOTTOMMARGIN);
                             break;
                         case (ushort)BiffRecordType.HCENTER:
-                            if (record.Data != null && record.Data.Length >= 2)
-                                worksheet.PageSettings.HorizontalCenter = BitConverter.ToUInt16(record.Data, 0) != 0;
+                            _worksheetConfigParser?.ParseCenterRecord(record, worksheet, true);
                             break;
                         case (ushort)BiffRecordType.VCENTER:
-                            if (record.Data != null && record.Data.Length >= 2)
-                                worksheet.PageSettings.VerticalCenter = BitConverter.ToUInt16(record.Data, 0) != 0;
+                            _worksheetConfigParser?.ParseCenterRecord(record, worksheet, false);
                             break;
                         case (ushort)BiffRecordType.PAGESETUP:
-                            ParsePageSetupRecord(record, worksheet);
+                            _worksheetConfigParser?.ParsePageSetupRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.FONT:
-                            ParseFontRecord(record, worksheet);
+                            _styleParser?.ParseFontRecordToWorksheet(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.XF:
-                            ParseXfRecord(record, worksheet);
+                            _styleParser?.ParseXfRecordToWorksheet(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.PALETTE:
-                            ParsePaletteRecord(record, worksheet);
+                            _styleParser?.ParsePaletteRecordToWorksheet(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.FORMAT:
-                            ParseFormatRecord(record);
+                            _styleParser?.ParseFormatRecord(record);
                             break;
                         case (ushort)BiffRecordType.SXVIEW:
                         case (ushort)BiffRecordType.SXVD:
@@ -729,13 +720,13 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                         case (ushort)BiffRecordType.SXDX:
                         case (ushort)BiffRecordType.SXFIELD:
                         case (ushort)BiffRecordType.SXPI:
-                            ParsePivotTableRecord(record, worksheet);
+                            _pivotTableParser?.ParsePivotTableRecord(record, worksheet);
                             break;
                         case (ushort)BiffRecordType.AUTOFILTERINFO:
-                            ParseAutoFilterInfoRecord(record, worksheet, workbook);
+                            _autoFilterParser?.ParseAutoFilterInfoRecord(record, worksheet, workbook);
                             break;
                         case (ushort)BiffRecordType.AUTOFILTER:
-                            ParseAutoFilterRecord(record, worksheet);
+                            _autoFilterParser?.ParseAutoFilterRecord(record, worksheet);
                             break;
                 case (ushort)BiffRecordType.SST:
                     ParseSstInfo(record, streamEnd);
@@ -847,75 +838,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                 targetRow.Cells.Add(cell);
                 if (cell.ColumnIndex > worksheet.MaxColumn)
                     worksheet.MaxColumn = cell.ColumnIndex;
-            }
-        }
-        
-        private void ParseColInfoRecord(BiffRecord record, Worksheet worksheet)
-        {
-            if (record.Data == null || record.Data.Length < 10)
-                return;
-            ushort firstCol = BitConverter.ToUInt16(record.Data, 0);
-            ushort lastCol = BitConverter.ToUInt16(record.Data, 2);
-            if (firstCol > lastCol)
-                return;
-            ushort width = BitConverter.ToUInt16(record.Data, 4);
-            ushort xfIndex = BitConverter.ToUInt16(record.Data, 6);
-            ushort options = BitConverter.ToUInt16(record.Data, 8);
-            bool hidden = (options & 0x0001) != 0;
-            worksheet.ColumnInfos.Add(new ColumnInfo
-            {
-                FirstColumn = firstCol,
-                LastColumn = lastCol,
-                Width = width,
-                XfIndex = xfIndex,
-                Hidden = hidden
-            });
-        }
-        
-        private void ParseWindow2Record(BiffRecord record, Worksheet worksheet)
-        {
-            // WINDOW2 记录: options(2) + ...
-            // options bit 3: 是否冻结窗格 (fFrozen)
-            if (record.Data != null && record.Data.Length >= 2)
-            {
-                ushort options = BitConverter.ToUInt16(record.Data, 0);
-                bool isFrozen = (options & 0x0008) != 0;
-                
-                if (isFrozen && worksheet.FreezePane == null)
-                {
-                    // 标记为冻结，具体位置由PANE记录设置
-                    worksheet.FreezePane = new FreezePane();
-                }
-            }
-        }
-        
-        private void ParsePaneRecord(BiffRecord record, Worksheet worksheet)
-        {
-            // PANE 记录: x(2) + y(2) + topRow(2) + leftCol(2) + activePane(1)
-            if (record.Data != null && record.Data.Length >= 8)
-            {
-                ushort x = BitConverter.ToUInt16(record.Data, 0); // 水平分割位置（列数或像素）
-                ushort y = BitConverter.ToUInt16(record.Data, 2); // 垂直分割位置（行数或像素）
-                ushort topRow = BitConverter.ToUInt16(record.Data, 4);
-                ushort leftCol = BitConverter.ToUInt16(record.Data, 6);
-                
-                if (worksheet.FreezePane != null)
-                {
-                    worksheet.FreezePane.ColSplit = x;
-                    worksheet.FreezePane.RowSplit = y;
-                    worksheet.FreezePane.TopRow = topRow + 1; // 转为1-based
-                    worksheet.FreezePane.LeftCol = leftCol + 1; // 转为1-based
-                }
-                else
-                {
-                    worksheet.FreezePane = new FreezePane
-                    {
-                        ColSplit = x,
-                        RowSplit = y,
-                        TopRow = topRow + 1, // 转为1-based
-                        LeftCol = leftCol + 1 // 转为1-based
-                    };
-                }
             }
         }
         
@@ -1342,81 +1264,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             worksheet.DataValidations.Add(dataValidation);
         }
         
-        private void ParseCFRecord(BiffRecord record, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 8)
-                return;
-            var conditionalFormat = new ConditionalFormat();
-
-            ushort conditionType = BitConverter.ToUInt16(data, 0);
-                switch (conditionType)
-                {
-                    case 0: conditionalFormat.Type = "cellIs"; break;
-                    case 1: conditionalFormat.Type = "expression"; break;
-                    case 2: conditionalFormat.Type = "colorScale"; break;
-                    case 3: conditionalFormat.Type = "dataBar"; break;
-                    case 4: conditionalFormat.Type = "iconSet"; break;
-                }
-
-            ushort operatorType = BitConverter.ToUInt16(data, 2);
-            switch (operatorType)
-            {
-                case 0: conditionalFormat.Operator = "between"; break;
-                case 1: conditionalFormat.Operator = "notBetween"; break;
-                case 2: conditionalFormat.Operator = "equal"; break;
-                case 3: conditionalFormat.Operator = "notEqual"; break;
-                case 4: conditionalFormat.Operator = "greaterThan"; break;
-                case 5: conditionalFormat.Operator = "lessThan"; break;
-                case 6: conditionalFormat.Operator = "greaterThanOrEqual"; break;
-                case 7: conditionalFormat.Operator = "lessThanOrEqual"; break;
-                case 8: conditionalFormat.Operator = "containsText"; break;
-                case 9: conditionalFormat.Operator = "notContainsText"; break;
-                case 10: conditionalFormat.Operator = "beginsWith"; break;
-                case 11: conditionalFormat.Operator = "endsWith"; break;
-            }
-            if (data.Length >= 12)
-            {
-                int currentOffset = 4;
-                ushort formula1Size = BitConverter.ToUInt16(data, currentOffset);
-                currentOffset += 2;
-                ushort formula2Size = BitConverter.ToUInt16(data, currentOffset);
-                currentOffset += 2;
-                if (currentOffset + 4 <= data.Length)
-                {
-                    currentOffset += 4;
-                    if (formula1Size > 0 && currentOffset + formula1Size <= data.Length)
-                    {
-                        byte[] ptg1 = new byte[formula1Size];
-                        Array.Copy(data, currentOffset, ptg1, 0, formula1Size);
-                        conditionalFormat.Formula = FormulaDecompiler.Decompile(ptg1, _workbook);
-                        currentOffset += formula1Size;
-                    }
-                    if (formula2Size > 0 && currentOffset + formula2Size <= data.Length)
-                    {
-                        byte[] ptg2 = new byte[formula2Size];
-                        Array.Copy(data, currentOffset, ptg2, 0, formula2Size);
-                        conditionalFormat.Formula2 = FormulaDecompiler.Decompile(ptg2, _workbook);
-                    }
-                }
-            }
-            conditionalFormat.Range = !string.IsNullOrEmpty(_currentCFRange) ? _currentCFRange : "A1:A10";
-            worksheet.ConditionalFormats.Add(conditionalFormat);
-        }
-        
-        private void ParseCFHeaderRecord(BiffRecord record, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 12)
-                return;
-            ushort conditionCount = BitConverter.ToUInt16(data, 0);
-            ushort firstRow = BitConverter.ToUInt16(data, 2);
-            ushort lastRow = BitConverter.ToUInt16(data, 4);
-            ushort firstCol = BitConverter.ToUInt16(data, 6);
-            ushort lastCol = BitConverter.ToUInt16(data, 8);
-            _currentCFRange = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
-        }
-
         private void ParseHyperlinkRecord(BiffRecord record, Worksheet worksheet)
         {
             byte[] data = record.GetAllData();
@@ -2278,53 +2125,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             cell.ArrayRef = $"{GetColumnLetter(firstCol)}{firstRow + 1}:{GetColumnLetter(lastCol)}{lastRow + 1}";
         }
 
-        /// <summary>解析 BIFF8 SHAREDFMLA (0x04BC)：前 8 字节为 firstRow, firstCol, lastRow, lastCol，随后为公式 token 数组，用于后续 FORMULA 按行列差展开。</summary>
-        private void ParseSharedFmlaRecord(BiffRecord record)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length < 10) return;
-            _sharedFormulaBaseRow = BitConverter.ToUInt16(data, 0);
-            _sharedFormulaBaseCol = BitConverter.ToUInt16(data, 2);
-            _sharedFormulaLastRow = BitConverter.ToUInt16(data, 4);
-            _sharedFormulaLastCol = BitConverter.ToUInt16(data, 6);
-            if (_sharedFormulaBaseRow > _sharedFormulaLastRow || _sharedFormulaBaseCol > _sharedFormulaLastCol) return;
-            byte[] formulaTokens = new byte[data.Length - 8];
-            Array.Copy(data, 8, formulaTokens, 0, formulaTokens.Length);
-            _sharedFormulaString = FormulaDecompiler.Decompile(formulaTokens, _workbook);
-        }
-
-        /// <summary>若当前公式单元格落在最近一次 SHAREDFMLA 范围内且非首格，则用主公式按行列差调整引用后写入。</summary>
-        private void ApplySharedFormulaToCell(Cell cell)
-        {
-            if (string.IsNullOrEmpty(_sharedFormulaString)) return;
-            int r0 = cell.RowIndex - 1;
-            int c0 = cell.ColumnIndex - 1;
-            if (r0 < _sharedFormulaBaseRow || r0 > _sharedFormulaLastRow || c0 < _sharedFormulaBaseCol || c0 > _sharedFormulaLastCol) return;
-            if (r0 == _sharedFormulaBaseRow && c0 == _sharedFormulaBaseCol) return;
-            int dr = r0 - _sharedFormulaBaseRow;
-            int dc = c0 - _sharedFormulaBaseCol;
-            cell.Formula = AdjustFormulaRefs(_sharedFormulaString, dr, dc);
-            if (cell.DataType != "f") cell.DataType = "f";
-        }
-
-        /// <summary>将公式中的相对引用按 (dr, dc) 平移。仅处理简单 A1 引用与 A1:B2 范围，不含 $ 的视为相对。</summary>
-        private static string AdjustFormulaRefs(string formula, int dr, int dc)
-        {
-            if (string.IsNullOrEmpty(formula) || (dr == 0 && dc == 0)) return formula;
-            return Regex.Replace(formula, @"(\$?)([A-Za-z]+)(\$?)(\d+)", m =>
-            {
-                bool absCol = m.Groups[1].Value.Length > 0;
-                bool absRow = m.Groups[3].Value.Length > 0;
-                string colLetters = m.Groups[2].Value;
-                int row = int.Parse(m.Groups[4].Value);
-                int col0 = ColumnLettersToIndex(colLetters);
-                int newCol = absCol ? col0 : (col0 + dc);
-                int newRow = absRow ? row : (row + dr);
-                if (newCol < 0 || newRow < 1) return m.Value;
-                return (absCol ? "$" : "") + GetColumnLetterStatic(newCol) + (absRow ? "$" : "") + newRow;
-            });
-        }
-
         private static int ColumnLettersToIndex(string letters)
         {
             return ExcelAddressHelper.LettersToColumnIndex0Based(letters);
@@ -2456,143 +2256,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
             });
         }
 
-        private void ParsePageSetupRecord(BiffRecord record, Worksheet worksheet)
-        {
-            // PAGESETUP (0x00A1) - BIFF8
-            if (record.Data != null && record.Data.Length >= 34)
-            {
-                var ps = worksheet.PageSettings;
-                ps.PaperSize = BitConverter.ToUInt16(record.Data, 0);
-                ps.Scale = BitConverter.ToUInt16(record.Data, 2);
-                ps.FitToWidth = BitConverter.ToUInt16(record.Data, 6);
-                ps.FitToHeight = BitConverter.ToUInt16(record.Data, 8);
-                
-                ushort options = BitConverter.ToUInt16(record.Data, 10);
-                ps.OrientationLandscape = (options & 0x0002) == 0;
-                ps.UsePageNumbers = (options & 0x0001) != 0;
-            }
-        }
-
-        private void ParseChartSubstream(Worksheet worksheet, Workbook workbook)
-        {
-            long streamEnd = _workbookData.Length;
-            BiffRecord? previousRecord = null;
-            Chart currentChart = new Chart();
-            Series? currentSeries = null;
-            
-            // 默认图表类型
-            currentChart.ChartType = "colChart";
-
-            while (_stream.Position < streamEnd)
-            {
-                try
-                {
-                    var recordStartPos = _stream.Position;
-                    var record = BiffRecord.Read(_reader);
-
-                    // 解密数据体
-                    if (_decryptor != null && record.Id != (ushort)BiffRecordType.BOF)
-                    {
-                        if (record.Data != null && record.Data.Length > 0)
-                        {
-                            _decryptor.Decrypt(record.Data, recordStartPos + 4);
-                        }
-                    }
-
-                    if (record.Id == (ushort)BiffRecordType.CONTINUE)
-                    {
-                        if (previousRecord != null && record.Data != null)
-                        {
-                            previousRecord.Continues.Add(record.Data);
-                        }
-                        continue;
-                    }
-
-                    if (previousRecord != null)
-                    {
-                        ProcessChartRecord(previousRecord, currentChart, ref currentSeries!, worksheet);
-                    }
-
-                    previousRecord = record;
-
-                    if (record.Id == (ushort)BiffRecordType.EOF)
-                    {
-                        break;
-                    }
-                }
-                catch (EndOfStreamException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"解析图表记录时发生错误: {ex.Message}", ex);
-                    continue;
-                }
-            }
-
-            if (previousRecord != null && previousRecord.Id != (ushort)BiffRecordType.EOF)
-            {
-                ProcessChartRecord(previousRecord, currentChart, ref currentSeries!, worksheet);
-            }
-            
-            // 确保图表有默认轴和图例
-            if (currentChart.XAxis == null) currentChart.XAxis = new Axis { Visible = true, Title = "X轴" };
-            if (currentChart.YAxis == null) currentChart.YAxis = new Axis { Visible = true, Title = "Y轴" };
-            if (currentChart.Legend == null) currentChart.Legend = new Legend { Visible = true, Position = "right" };
-            
-            // 应用等待分配的坐标信息
-            if (_pendingChartAnchors.Count > worksheet.Charts.Count)
-            {
-                var anchor = _pendingChartAnchors[worksheet.Charts.Count];
-                currentChart.Left = anchor.Left;
-                currentChart.Top = anchor.Top;
-            }
-
-            worksheet.Charts.Add(currentChart);
-            Logger.Info($"成功向工作表 {worksheet.Name} 添加了 1 个图表 (类型: {currentChart.ChartType}, 系列数: {currentChart.Series.Count})");
-        }
-
-        private void ProcessChartRecord(BiffRecord record, Chart chart, ref Series currentSeries, Worksheet worksheet)
-        {
-            byte[] data = record.GetAllData();
-            if (data == null || data.Length == 0) return;
-
-            switch (record.Id)
-            {
-                case (ushort)BiffRecordType.CHART3D:
-                    // BIFF8 CHART3D (0x103A) - 标记为3D图表；详细参数（旋转、透视等）暂不解析
-                    chart.Is3D = true;
-                    break;
-                case 0x1017: // Bar
-                    chart.ChartType = "barChart";
-                    break;
-                case 0x1018: // Line
-                    chart.ChartType = "lineChart";
-                    break;
-                case 0x1019: // Pie
-                    chart.ChartType = "pieChart";
-                    break;
-                case 0x101B: // Scatter
-                    chart.ChartType = "scatterChart";
-                    break;
-                case 0x101A: // Area
-                    chart.ChartType = "areaChart";
-                    break;
-                case 0x1020: // Radar
-                    chart.ChartType = "radarChart";
-                    break;
-                case (ushort)BiffRecordType.CHARTSERIES:
-                    currentSeries = new Series();
-                    // 添加默认范围，实际公式解析较复杂
-                    currentSeries.ValuesRange = $"{worksheet.Name}!$B$2:$B$6";
-                    currentSeries.CategoriesRange = $"{worksheet.Name}!$A$2:$A$6";
-                    currentSeries.LineStyle = new LineStyle { Width = 2 };
-                    chart.Series.Add(currentSeries);
-                    break;
-            }
-        }
-
         private string GetBorderLineStyle(byte styleId) => ParsingHelpers.GetBorderLineStyle(styleId);
 
         private string? GetColorFromPalette(int colorIndex, Worksheet? sheet = null)
@@ -2614,276 +2277,6 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
                 return defaultColor;
 
             return null;
-        }
-
-        private void ParseExternBookRecord(BiffRecord record, Workbook workbook)
-        {
-            if (record.Data != null && record.Data.Length >= 4)
-            {
-                ushort count = BitConverter.ToUInt16(record.Data, 0);
-                ushort type = BitConverter.ToUInt16(record.Data, 2);
-                
-                var extBook = new ExternalBook();
-                
-                if (type == 0x0401)
-                {
-                    extBook.IsSelf = true;
-                    Logger.Info("找到内部引用 (Self SUPBOOK)");
-                }
-                else if (type == 0x3A01)
-                {
-                    extBook.IsAddIn = true;
-                    Logger.Info("找到 Add-In 引用");
-                }
-                else
-                {
-                    // 外部文件路径 + 工作表名称列表
-                    int offset = 4;
-                    if (offset >= record.Data.Length)
-                    {
-                        workbook.ExternalBooks.Add(extBook);
-                        return;
-                    }
-                    byte cchPath = record.Data[offset];
-                    offset++;
-                    extBook.FileName = ReadBiffStringFromBytes(record.Data, ref offset, cchPath);
-                    Logger.Info($"找到外部工作簿引用: {extBook.FileName}");
-
-                    // 后续 count 个工作表名称
-                    for (int i = 0; i < count && offset < record.Data.Length; i++)
-                    {
-                        if (offset + 2 > record.Data.Length) break;
-                        byte cchSheet = record.Data[offset];
-                        offset++;
-                        string sheetName = ReadBiffStringFromBytes(record.Data, ref offset, cchSheet);
-                        extBook.SheetNames.Add(sheetName);
-                    }
-                }
-                
-                workbook.ExternalBooks.Add(extBook);
-            }
-        }
-
-        private void ParseExternSheetRecord(BiffRecord record, Workbook workbook)
-        {
-            if (record.Data != null && record.Data.Length >= 2)
-            {
-                ushort count = BitConverter.ToUInt16(record.Data, 0);
-                
-                for (int i = 0; i < count; i++)
-                {
-                    int offset = 2 + i * 6;
-                    if (offset + 6 <= record.Data.Length)
-                    {
-                        var extSheet = new ExternalSheet
-                        {
-                            ExternalBookIndex = BitConverter.ToUInt16(record.Data, offset),
-                            FirstSheetIndex = BitConverter.ToInt16(record.Data, offset + 2),
-                            LastSheetIndex = BitConverter.ToInt16(record.Data, offset + 4)
-                        };
-                        workbook.ExternalSheets.Add(extSheet);
-                    }
-                }
-                Logger.Info($"解析 EXTERNSHEET, 共有 {count} 个引用映射");
-            }
-        }
-
-        private void ParseExternalNameRecord(BiffRecord record, Workbook workbook)
-        {
-            if (record.Data != null && record.Data.Length >= 6)
-            {
-                // BIFF8 EXTERNALNAME
-                ushort options = BitConverter.ToUInt16(record.Data, 0);
-                byte nameLen = record.Data[3];
-                
-                int offset = 6;
-                string name = ReadBiffStringFromBytes(record.Data, ref offset, nameLen);
-                
-                if (workbook.ExternalBooks.Count > 0)
-                {
-                    workbook.ExternalBooks[workbook.ExternalBooks.Count - 1].ExternalNames.Add(name);
-                }
-                
-                Logger.Info($"找到外部工作簿名称引用: {name}");
-            }
-        }
-
-        private void ParseAutoFilterInfoRecord(BiffRecord record, Worksheet worksheet, Workbook workbook)
-        {
-            if (record.Data == null || record.Data.Length < 2) return;
-            ushort cEntries = BitConverter.ToUInt16(record.Data, 0);
-            worksheet.AutoFilterColumnIndices.Clear();
-            if (workbook.DefinedNames != null)
-            {
-                foreach (var dn in workbook.DefinedNames)
-                {
-                    if (dn?.Name != "FilterDatabase" && dn?.Name != "_xlnm._FilterDatabase") continue;
-                    if (dn.LocalSheetId.HasValue && dn.LocalSheetId.Value != _currentSheetIndex) continue;
-                    if (string.IsNullOrEmpty(dn.Formula)) continue;
-                    worksheet.AutoFilterRange = StripDefinedNameToRange(dn.Formula);
-                    break;
-                }
-            }
-            if (string.IsNullOrEmpty(worksheet.AutoFilterRange))
-                worksheet.AutoFilterRange = "A1:Z100";
-        }
-
-        private static string StripDefinedNameToRange(string formula)
-        {
-            if (string.IsNullOrEmpty(formula)) return formula;
-            int excl = formula.IndexOf('!');
-            string rangePart = excl >= 0 ? formula.Substring(excl + 1).Trim() : formula;
-            return rangePart.Replace("$", "");
-        }
-
-        private void ParseAutoFilterRecord(BiffRecord record, Worksheet worksheet)
-        {
-            if (record.Data == null || record.Data.Length < 2) return;
-            ushort iEntry = BitConverter.ToUInt16(record.Data, 0);
-            if (worksheet.AutoFilterColumnIndices == null)
-                worksheet.AutoFilterColumnIndices = new List<int>();
-            worksheet.AutoFilterColumnIndices.Add((int)iEntry);
-        }
-
-        private void ParsePivotTableRecord(BiffRecord record, Worksheet worksheet)
-        {
-            if (record.Data == null) return;
-
-            switch (record.Id)
-            {
-                case (ushort)BiffRecordType.SXVIEW:
-                    // SXVIEW (0x00B0) - 开始一个新的数据透视表
-                    if (record.Data.Length >= 16)
-                    {
-                        var pivotTable = new PivotTable();
-                        // 部分 BIFF 实现中前 16 字节含范围：offset 4-5 rwFirst, 6-7 rwLast, 8-9 colFirst, 10-11 colLast (0-based)
-                        if (record.Data.Length >= 12)
-                        {
-                            ushort rwFirst = BitConverter.ToUInt16(record.Data, 4);
-                            ushort rwLast = BitConverter.ToUInt16(record.Data, 6);
-                            ushort colFirst = BitConverter.ToUInt16(record.Data, 8);
-                            ushort colLast = BitConverter.ToUInt16(record.Data, 10);
-                            if (rwLast >= rwFirst && colLast >= colFirst && rwLast < 65535 && colLast < 256)
-                            {
-                                pivotTable.DataSource = $"{GetColumnLetterStatic(colFirst + 1)}{rwFirst + 1}:{GetColumnLetterStatic(colLast + 1)}{rwLast + 1}";
-                            }
-                        }
-                        int offset = 16;
-                        // SXVIEW 中的表名由一个两字节的字符数开始 (BIFF8)
-                        if (offset + 2 <= record.Data.Length)
-                        {
-                            ushort nameLen = BitConverter.ToUInt16(record.Data, offset);
-                            offset += 2;
-                            pivotTable.Name = ReadBiffStringFromBytes(record.Data, ref offset, nameLen);
-                        }
-                        _currentPivotTable = pivotTable;
-                        worksheet.PivotTables.Add(pivotTable);
-                        Logger.Info($"开始解析数据透视表: {pivotTable.Name}");
-                    }
-                    break;
-
-                case (ushort)BiffRecordType.SXVD:
-                    // SXVD (0x00B1) - 字段属性
-                    if (_currentPivotTable != null && record.Data.Length >= 2)
-                    {
-                        ushort sxaxis = BitConverter.ToUInt16(record.Data, 0);
-                        var field = new PivotField();
-                        
-                        // sxaxis: 0=no axis, 1=row, 2=col, 4=page, 8=data
-                        if ((sxaxis & 0x01) != 0) field.Type = "row";
-                        else if ((sxaxis & 0x02) != 0) field.Type = "column";
-                        else if ((sxaxis & 0x04) != 0) field.Type = "page";
-                        else if ((sxaxis & 0x08) != 0) field.Type = "data";
-                        
-                        if (field.Type == "row") _currentPivotTable.RowFields.Add(field);
-                        else if (field.Type == "column") _currentPivotTable.ColumnFields.Add(field);
-                        else if (field.Type == "page") _currentPivotTable.PageFields.Add(field);
-                        else if (field.Type == "data") _currentPivotTable.DataFields.Add(field);
-                        _currentPivotField = field;
-                    }
-                    break;
-
-                case (ushort)BiffRecordType.SXDX:
-                    // SXDX (0x00C6) - 数据字段的具体信息
-                    if (_currentPivotTable != null && _currentPivotTable.DataFields.Count > 0)
-                    {
-                        var lastDataField = _currentPivotTable.DataFields[_currentPivotTable.DataFields.Count - 1];
-                        if (record.Data.Length >= 4)
-                        {
-                            ushort iSubtotal = BitConverter.ToUInt16(record.Data, 2);
-                            // 0=Sum, 1=Count, 2=Average, etc.
-                            string[] funcs = { "sum", "count", "average", "max", "min", "product", "countNums", "stdDev", "stdDevp", "var", "varp" };
-                            if (iSubtotal < funcs.Length) lastDataField.Function = funcs[iSubtotal];
-                        }
-                    }
-                    break;
-
-                case (ushort)BiffRecordType.SXVI:
-                    // SXVI (0x00B2) - 数据透视表项（在透视表流中，与全局 BORDER 同 ID 按流区分）
-                    if (_currentPivotField != null && record.Data != null && record.Data.Length >= 2)
-                    {
-                        ushort cItem = BitConverter.ToUInt16(record.Data, 0);
-                        int off = 2;
-                        for (int i = 0; i < cItem && off + 2 <= record.Data.Length; i++)
-                        {
-                            ushort cch = BitConverter.ToUInt16(record.Data, off);
-                            off += 2;
-                            if (cch == 0) continue;
-                            if (off + cch > record.Data.Length) break;
-                            string itemStr = ReadBiffStringFromBytes(record.Data, ref off, cch);
-                            _currentPivotField.Items.Add(itemStr);
-                        }
-                    }
-                    break;
-
-                case (ushort)BiffRecordType.SXFIELD:
-                    // SXFIELD (0x00CA) - 字段名称及属性
-                    if (_currentPivotTable != null && record.Data.Length >= 4)
-                    {
-                        int offset = 4;
-                        // BIFF8 SXFIELD name starts with 2-byte char count
-                        if (offset + 2 <= record.Data.Length)
-                        {
-                            ushort cch = BitConverter.ToUInt16(record.Data, offset);
-                            offset += 2;
-                            string fieldName = ReadBiffStringFromBytes(record.Data, ref offset, cch);
-                            // 这里暂时无法完美回填，因为字段关联逻辑较复杂（通常按顺序）
-                            // 简单起见，如果字段列表非空，回填到最后一个未命名的字段
-                            var allFields = _currentPivotTable.RowFields
-                                .Concat(_currentPivotTable.ColumnFields)
-                                .Concat(_currentPivotTable.PageFields)
-                                .Concat(_currentPivotTable.DataFields);
-                            
-                            foreach (var f in allFields)
-                            {
-                                if (string.IsNullOrEmpty(f.Name))
-                                {
-                                    f.Name = fieldName;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    break;
-
-                case (ushort)BiffRecordType.SXPI:
-                    // SXPI (0x00B7) - 页字段项
-                    if (_currentPivotField != null && _currentPivotField.Type == "page" && record.Data != null && record.Data.Length >= 2)
-                    {
-                        ushort cItem = BitConverter.ToUInt16(record.Data, 0);
-                        int off = 2;
-                        for (int i = 0; i < cItem && off + 2 <= record.Data.Length; i++)
-                        {
-                            ushort cch = BitConverter.ToUInt16(record.Data, off);
-                            off += 2;
-                            if (cch == 0) continue;
-                            if (off + cch > record.Data.Length) break;
-                            string itemStr = ReadBiffStringFromBytes(record.Data, ref off, cch);
-                            _currentPivotField.Items.Add(itemStr);
-                        }
-                    }
-                    break;
-            }
         }
 
         private string GetPatternType(byte patternId) => ParsingHelpers.GetPatternType(patternId);
