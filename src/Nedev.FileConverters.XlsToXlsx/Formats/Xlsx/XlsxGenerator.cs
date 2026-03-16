@@ -1410,16 +1410,18 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xlsx
                 writer.WriteEndElement(); // pageSetup
 
                 // P3: headerFooter (页眉页脚)
-                if (!string.IsNullOrEmpty(ps.Header) || !string.IsNullOrEmpty(ps.Footer))
+                string cleanHeader = CleanXmlString(ps.Header);
+                string cleanFooter = CleanXmlString(ps.Footer);
+                if (!string.IsNullOrEmpty(cleanHeader) || !string.IsNullOrEmpty(cleanFooter))
                 {
                     writer.WriteStartElement("headerFooter");
-                    if (!string.IsNullOrEmpty(ps.Header))
+                    if (!string.IsNullOrEmpty(cleanHeader))
                     {
-                        writer.WriteElementString("oddHeader", ps.Header);
+                        writer.WriteElementString("oddHeader", cleanHeader);
                     }
-                    if (!string.IsNullOrEmpty(ps.Footer))
+                    if (!string.IsNullOrEmpty(cleanFooter))
                     {
-                        writer.WriteElementString("oddFooter", ps.Footer);
+                        writer.WriteElementString("oddFooter", cleanFooter);
                     }
                     writer.WriteEndElement(); // headerFooter
                 }

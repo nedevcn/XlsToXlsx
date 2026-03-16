@@ -170,6 +170,23 @@ namespace Nedev.FileConverters.XlsToXlsx.Formats.Xls
         }
 
         /// <summary>
+        /// 解析 STRING 记录（公式字符串结果）
+        /// </summary>
+        public void ParseStringRecord(BiffRecord record, Row? currentRow)
+        {
+            if (currentRow == null || currentRow.Cells.Count == 0) return;
+
+            var lastCell = currentRow.Cells[currentRow.Cells.Count - 1];
+            byte[] strData = record.GetAllData();
+            if (strData.Length > 0)
+            {
+                int strOffset = 0;
+                lastCell.Value = RichTextParser.ReadBiffString(strData, ref strOffset);
+                lastCell.DataType = "inlineStr";
+            }
+        }
+
+        /// <summary>
         /// 应用共享公式到单元格
         /// </summary>
         public void ApplySharedFormula(Cell cell)
